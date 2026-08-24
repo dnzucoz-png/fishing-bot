@@ -10,15 +10,13 @@ from aiogram.filters import Command
 # Налаштування логування
 logging.basicConfig(level=logging.INFO)
 
-import os
-
-# Отримуємо токен з середовища, або вставляємо напряму, якщо середовище не підтягнулось
+# Отримуємо токен безпечно з налаштувань Render, або використовуємо резервний
 TOKEN = os.getenv("BOT_TOKEN") or "8373587458:AAEVFuI-yRfE4vTeKT86idwi-0ytbl122T4"
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Базові координати для областей
+# Базові координати для областей України
 REGIONS = {
     "Дніпропетровська": {"lat": 48.4647, "lon": 35.0462},
     "Київська": {"lat": 50.4501, "lon": 30.5234},
@@ -36,11 +34,11 @@ class MultiSourceWeatherClient:
         self.lon = lon
 
     async def evaluate_biting(self, fish_type, region, hour, day_offset):
-        """Отримання даних з Open-Meteo та розрахунок прогнозу."""
+        """Отримання актуальних даних з Open-Meteo та розрахунок прогнозу кльову."""
         url = (
             f"https://api.open-meteo.com/v1/forecast?latitude={self.lat}&longitude={self.lon}"
-            "&hourly=temperature_2m,apparent_temperature,relative_humidity_2m,surface_pressure,wind_speed_10m,wind_direction_10m,cloud_cover,precipitation"
-            "&timezone=auto&past_days=0&forecast_days=3"
+            "&hourly=temperature_2m,surface_pressure,wind_speed_10m,precipitation"
+            "&timezone=auto&forecast_days=3"
         )
         
         try:
@@ -66,11 +64,20 @@ class MultiSourceWeatherClient:
                 logging.error("Отримано порожні дані погоди від API")
                 return None
 
-            idx = min(hour, len(temps) - 1)
-            
+            # Безпечно шукаємо індекс потрібної години в масиві часу
+            target_hour_str = f"{hour:02d}:00"
+            idx = 0
+            for i, t in enumerate(times):
+                if target_hour_str in t:
+                    idx = i
+                    break
+
+            if idx >= len(temps):
+                idx = 0
+
             temperature = temps[idx]
             pressure_hpa = pressures[idx] if idx < len(pressures) else 1013
-            pressure_mm = round(pressure_hpa * 0.750062, 1)
+            pressure_mm = round(pressure_hpa * 0.750062, 1) # переведення в мм рт. ст.
             wind_ms = winds[idx] if idx < len(winds) else 3.0
             precipitation = precips[idx] if idx < len(precips) else 0.0
 
@@ -90,7 +97,7 @@ class MultiSourceWeatherClient:
                 'expert_commentary': "Чудові погодні умови для риболовлі. Риба проявляє активність у прибережній зоні."
             }
         except Exception as e:
-            logging.error(f"Помилка обробки погодних даних: {e}")
+            logging.error(f"Помилка обробки погодних даних усередині блоку: {e}")
             return None
 
 
@@ -183,7 +190,7 @@ async def handle_hour_callback(callback: CallbackQuery):
     await callback.answer()
 
 
-# Простий вебсервер для задоволення вимог Render до портів
+# Вебсервер для задоволення вимог Render до портів
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
 
@@ -193,7 +200,6 @@ async def web_server():
     runner = web.AppRunner(app)
     await runner.setup()
     
-    # Render передає порт через змінну середовища PORT, за замовчуванням беремо 10000
     port = int(os.getenv("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
@@ -202,7 +208,6 @@ async def web_server():
 
 async def main():
     print("Бот запущено...")
-    # Запускаємо і вебсервер (для порту Render), і бота паралельно
     await web_server()
     await dp.start_polling(bot)
 
