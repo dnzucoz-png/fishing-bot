@@ -2,6 +2,7 @@ import os
 import logging
 import aiohttp
 import asyncio
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
@@ -9,10 +10,8 @@ from aiogram.filters import Command
 # Налаштування логування
 logging.basicConfig(level=logging.INFO)
 
-import os
-
 # Отримуємо токен безпечно з налаштувань Render
-TOKEN = os.getenv("BOT_TOKEN")
+TOKEN = os.getenv("8373587458:AAEVFuI-yRfE4vTeKT86idwi-0ytbl122T4")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -65,12 +64,11 @@ class MultiSourceWeatherClient:
                 logging.error("Отримано порожні дані погоди від API")
                 return None
 
-            # Беремо перші ліпші дані або індекс за годиною
             idx = min(hour, len(temps) - 1)
             
             temperature = temps[idx]
             pressure_hpa = pressures[idx] if idx < len(pressures) else 1013
-            pressure_mm = round(pressure_hpa * 0.750062, 1) # переведення в мм рт. ст.
+            pressure_mm = round(pressure_hpa * 0.750062, 1)
             wind_ms = winds[idx] if idx < len(winds) else 3.0
             precipitation = precips[idx] if idx < len(precips) else 0.0
 
@@ -112,7 +110,6 @@ async def cmd_start(message: Message):
         reply_markup=keyboard
     )
     
-    # Виводимо вибір риби
     fish_keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Лящ", callback_data="fish_Лящ"), InlineKeyboardButton(text="Карась", callback_data="fish_Карась")]
     ])
@@ -128,7 +125,6 @@ async def handle_fish_callback(callback: CallbackQuery):
         user_states[user_id] = {}
     user_states[user_id]["fish"] = fish_type
     
-    # Кнопки вибору часу
     hours_keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🌅 Світанок (06:00)", callback_data="hour_6")],
         [InlineKeyboardButton(text="☀️ День (12:00)", callback_data="hour_12")],
@@ -157,7 +153,6 @@ async def handle_hour_callback(callback: CallbackQuery):
     coords = REGIONS[region]
     client = MultiSourceWeatherClient(coords["lat"], coords["lon"])
     
-    # Отримуємо прогноз погоди
     result = await client.evaluate_biting(fish_type, region, hour, day_offset)
     
     if not result:
@@ -186,8 +181,27 @@ async def handle_hour_callback(callback: CallbackQuery):
     await callback.answer()
 
 
+# Простий вебсервер для задоволення вимог Render до портів
+async def handle_ping(request):
+    return web.Response(text="Bot is running!")
+
+async def web_server():
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    # Render передає порт через змінну середовища PORT, за замовчуванням беремо 10000
+    port = int(os.getenv("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logging.info(f"Вебсервер запущено на порту {port}")
+
+
 async def main():
     print("Бот запущено...")
+    # Запускаємо і вебсервер (для порту Render), і бота паралельно
+    await web_server()
     await dp.start_polling(bot)
 
 
