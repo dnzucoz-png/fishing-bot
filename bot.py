@@ -148,7 +148,7 @@ def check_sun_activity(hour: int) -> Tuple[str, str, int]:
         return "☀️ День", "Стандартна активність.", 0
 
 
-# --- ПОГОДНИЙ КЛІЄНТ ---
+# --- ПОГОДНИЙ КЛІЄНТ (ЗБІЛЬШЕНИЙ ТАЙМАУТ ТА ЛОГУВАННЯ) ---
 class MultiSourceWeatherClient:
     def __init__(self, lat: float, lon: float):
         self.lat = lat
@@ -165,12 +165,14 @@ class MultiSourceWeatherClient:
         )
         for attempt in range(3):
             try:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=12)) as resp:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
                     if resp.status == 200:
                         return await resp.json()
+                    else:
+                        logging.error(f"Помилка API Open-Meteo статус: {resp.status} для URL: {url}")
             except Exception as e:
-                logging.warning(f"Спроба {attempt+1} Open-Meteo: {e}")
-                await asyncio.sleep(1.2)
+                logging.warning(f"Спроба {attempt+1} Open-Meteo помилка: {e}")
+                await asyncio.sleep(2)
         return None
 
     async def get_averaged_weather(self):
@@ -183,11 +185,17 @@ class MultiSourceWeatherClient:
         async with aiohttp.ClientSession() as session:
             res1, res2 = await asyncio.gather(
                 self.fetch_open_meteo(session),
-                self.fetch_open_meteo(session, "ecmwf_ifs04")
+                self.fetch_open_meteo(session, "ecmwf_ifs04"),
+                return_exceptions=True
             )
 
+        res1 = res1 if isinstance(res1, dict) else None
+        res2 = res2 if isinstance(res2, dict) else None
+
         if not res1 and not res2:
+            logging.error("Обидва джерела погоди (GFS та ECMWF) повернули порожній результат.")
             return None
+
         if not res1:
             data = res2
         elif not res2:
@@ -207,7 +215,8 @@ class MultiSourceWeatherClient:
                         ]
                 res1["hourly"] = {**h1, **averaged}
                 data = res1
-            except Exception:
+            except Exception as ex:
+                logging.error(f"Помилка об'єднання даних моделей: {ex}")
                 data = res1
 
         weather_cache[self.cache_key] = (data, now)
@@ -740,7 +749,7 @@ async def main():
     # Запускаємо фоновий вебсервер для платформи Render
     asyncio.create_task(web_server())
     
-    # Видаляємо вебхуки для уникнення конфліктів локального запуску
+    # Видаляємо вебхуки для уникнення конфліктів
     await bot.delete_webhook(drop_pending_updates=True)
     
     await dp.start_polling(bot)
