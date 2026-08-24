@@ -33,7 +33,7 @@ REGIONS = {
 FISH_LIST = ["Лящ", "Карась", "Короп", "Щука", "Окунь", "Сом", "Плотва"]
 
 weather_cache = {}
-CACHE_TTL = 20 * 60  # 20 хвилин
+CACHE_TTL = 45 * 60  # 45 хвилин (захист від 429)
 
 
 class ForecastStates(StatesGroup):
@@ -170,55 +170,45 @@ class MultiSourceWeatherClient:
         )
         for attempt in range(3):
             try:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=12)) as resp:
+                timeout = aiohttp.ClientTimeout(total=18, connect=8)
+                async with session.get(url, timeout=timeout) as resp:
                     if resp.status == 200:
                         return await resp.json()
+                    elif resp.status == 429:
+                        logging.error(f"Open-Meteo 429 (rate limit). Чекаю... (model={model})")
+                        await asyncio.sleep(25 + attempt * 15)
+                    else:
+                        logging.error(f"Open-Meteo статус {resp.status} (model={model})")
+                        await asyncio.sleep(3)
             except Exception as e:
-                logging.warning(f"Спроба {attempt + 1} Open-Meteo: {e}")
-                await asyncio.sleep(1.2)
+                logging.warning(f"Помилка Open-Meteo (model={model}): {e}")
+                await asyncio.sleep(2 + attempt)
         return None
 
     async def get_averaged_weather(self):
         now = datetime.now().timestamp()
+
+        # Агресивний кеш 45 хвилин
         if self.cache_key in weather_cache:
             data, ts = weather_cache[self.cache_key]
             if now - ts < CACHE_TTL:
+                logging.info("Використовую кеш погоди")
                 return data
 
         async with aiohttp.ClientSession() as session:
-            res1, res2 = await asyncio.gather(
-                self.fetch_open_meteo(session),
-                self.fetch_open_meteo(session, "ecmwf_ifs04")
-            )
+            # Спочатку тільки GFS (менше шансів зловити 429)
+            res1 = await self.fetch_open_meteo(session)
 
-        if not res1 and not res2:
-            return None
-        if not res1:
-            data = res2
-        elif not res2:
-            data = res1
-        else:
-            try:
-                h1, h2 = res1["hourly"], res2["hourly"]
-                averaged = {}
-                keys = [
-                    "temperature_2m", "apparent_temperature", "relative_humidity_2m",
-                    "surface_pressure", "wind_speed_10m", "wind_direction_10m",
-                    "cloud_cover", "precipitation"
-                ]
-                for key in keys:
-                    if key in h1 and key in h2:
-                        averaged[key] = [
-                            (a + b) / 2 if a is not None and b is not None else (a or b)
-                            for a, b in zip(h1[key], h2[key])
-                        ]
-                res1["hourly"] = {**h1, **averaged}
-                data = res1
-            except Exception:
-                data = res1
+            if not res1:
+                logging.warning("GFS не відповів, пробую ECMWF...")
+                res1 = await self.fetch_open_meteo(session, "ecmwf_ifs04")
 
-        weather_cache[self.cache_key] = (data, now)
-        return data
+            if not res1:
+                logging.error("Не вдалося отримати погоду ні з одного джерела")
+                return None
+
+            weather_cache[self.cache_key] = (res1, now)
+            return res1
 
     def _pressure_score(self, pressure_mm: float, is_predator: bool) -> int:
         optimum = 748 if is_predator else 752
@@ -466,7 +456,7 @@ class MultiSourceWeatherClient:
             "stars": stars,
             "stars_graphic": "⭐" * stars + "☆" * (5 - stars),
             "expert_commentary": commentary,
-            "sources_used": "Open-Meteo (GFS + ECMWF)",
+            "sources_used": "Open-Meteo (GFS)",
             "score_100": final_score,
         }
 
@@ -521,7 +511,7 @@ async def cmd_help(message: Message):
         "• Температура повітря і води\n"
         "• Вітер, опади та хмарність\n"
         "• Золоті години та фаза місяця\n\n"
-        "Джерела: Open-Meteo (GFS + ECMWF)"
+        "Джерела: Open-Meteo (GFS)"
     )
     await message.answer(text, parse_mode="HTML")
 
@@ -653,8 +643,10 @@ async def handle_hour(callback: CallbackQuery, state: FSMContext):
     result = await client.evaluate_biting(fish_type, region, hour, day_offset)
     if not result:
         await callback.message.answer(
-            "❌ Не вдалося отримати дані. Спробуйте пізніше.",
-            reply_markup=get_regions_keyboard(),
+            "❌ Не вдалося отримати метеодані.\n"
+            "Open-Meteo тимчасово обмежив запити (429).\n"
+            "Спробуйте через 1–2 хвилини.",
+            reply_markup=get_regions_keyboard()
         )
         await state.clear()
         await callback.answer()
@@ -729,7 +721,7 @@ async def fallback(message: Message, state: FSMContext):
         await message.answer("Натисніть /start", reply_markup=get_regions_keyboard())
 
 
-# ====================== ЗАПУСК (з підтримкою Render) ======================
+# ====================== ЗАПУСК (Render + Health) ======================
 async def health(_):
     return web.Response(text="Fishing bot is running ✅")
 
@@ -738,7 +730,7 @@ async def main():
     init_db()
     logging.basicConfig(level=logging.INFO)
 
-    # Dummy HTTP-сервер для Render Web Service
+    # Dummy HTTP-сервер для Render
     app = web.Application()
     app.router.add_get("/", health)
     runner = web.AppRunner(app)
@@ -749,7 +741,7 @@ async def main():
     await site.start()
     logging.info(f"Health server started on port {port}")
 
-    # Запускаємо Telegram-бота
+    # Запускаємо бота
     await dp.start_polling(bot)
 
 
