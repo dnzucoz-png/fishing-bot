@@ -64,7 +64,7 @@ class MultiSourceWeatherClient:
                 logging.error("Отримано порожні дані погоди від API")
                 return None
 
-            # Безпечно шукаємо індекс потрібної години в масиві часу
+            # Шукаємо індекс потрібної години в масиві часу
             target_hour_str = f"{hour:02d}:00"
             idx = 0
             for i, t in enumerate(times):
@@ -108,15 +108,18 @@ def save_forecast_to_db(user_id, region, fish_type, forecast_day, pressure_mm, w
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
-    user_states[message.from_user.id] = {"region": "Дніпропетровська", "fish": "Лящ", "day_offset": 0}
+    user_id = message.from_user.id
+    # Встановлюємо значення за замовчуванням
+    user_states[user_id] = {"region": "Дніпропетровська", "fish": "Лящ", "day_offset": 0}
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📍 Змінити область", callback_data="change_region")]
     ])
     
     await message.answer(
-        "Привіт! Оберіть область для риболовлі або перегляньте історію:",
-        reply_markup=keyboard
+        f"📍 Поточна область: **Дніпропетровська**\nОберіть область для риболовлі або почніть вибір риби:",
+        reply_markup=keyboard,
+        parse_mode="Markdown"
     )
     
     fish_keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -125,13 +128,44 @@ async def cmd_start(message: Message):
     await message.answer("Виберіть рибу:", reply_markup=fish_keyboard)
 
 
+# Обробник кнопки зміни області
+@dp.callback_query(F.data == "change_region")
+async def handle_change_region(callback: CallbackQuery):
+    keyboard_regions = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Дніпропетровська", callback_data="region_Дніпропетровська")],
+        [InlineKeyboardButton(text="Київська", callback_data="region_Київська")],
+        [InlineKeyboardButton(text="Львівська", callback_data="region_Львівська")],
+        [InlineKeyboardButton(text="Одеська", callback_data="region_Одеська")]
+    ])
+    await callback.message.answer("Оберіть область з решти списку:", reply_markup=keyboard_regions)
+    await callback.answer()
+
+
+# Обробник вибору конкретної області
+@dp.callback_query(F.data.startswith("region_"))
+async def handle_region_selected(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    region_name = callback.data.split("_")[1]
+    
+    if user_id not in user_states:
+        user_states[user_id] = {"fish": "Лящ", "day_offset": 0}
+    
+    user_states[user_id]["region"] = region_name
+    
+    fish_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Лящ", callback_data="fish_Лящ"), InlineKeyboardButton(text="Карась", callback_data="fish_Карась")]
+    ])
+    await callback.message.answer(f"✅ Успішно обрано область: **{region_name}**.\nТепер виберіть рибу:", reply_markup=fish_keyboard, parse_mode="Markdown")
+    await callback.answer()
+
+
 @dp.callback_query(F.data.startswith("fish_"))
 async def handle_fish_callback(callback: CallbackQuery):
     user_id = callback.from_user.id
     fish_type = callback.data.split("_")[1]
     
     if user_id not in user_states:
-        user_states[user_id] = {}
+        user_states[user_id] = {"region": "Дніпропетровська", "day_offset": 0}
     user_states[user_id]["fish"] = fish_type
     
     hours_keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -140,7 +174,8 @@ async def handle_fish_callback(callback: CallbackQuery):
         [InlineKeyboardButton(text="🌇 Захід сонця (20:00)", callback_data="hour_20")]
     ])
     
-    await callback.message.answer(f"Вибрано рибу: {fish_type}.\nОберіть час доби:", reply_markup=hours_keyboard)
+    current_region = user_states[user_id].get("region", "Дніпропетровська")
+    await callback.message.answer(f"📍 Область: {current_region} | Вибрано рибу: {fish_type}.\nОберіть час доби:", reply_markup=hours_keyboard)
     await callback.answer()
 
 
