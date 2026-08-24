@@ -10,9 +10,11 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 import aiohttp
+from aiohttp import web
+import os
 
 # --- НАЛАШТУВАННЯ ---
-API_TOKEN = "8373587458:AAEVFuI-yRfE4vTeKT86idwi-0ytbl122T4"
+API_TOKEN = os.getenv("BOT_TOKEN") or "8373587458:AAEVFuI-yRfE4vTeKT86idwi-0ytbl122T4"
 GROUP_CHAT_ID = -1004434293069
 GROUP_URL = "https://t.me/+rKxYkNg85aAwNzFi"
 
@@ -571,10 +573,9 @@ async def handle_fish(message: Message, state: FSMContext):
         d = today + timedelta(days=i)
         label = {0: f"Сьогодні ({d.strftime('%d.%m')})",
                  1: f"Завтра ({d.strftime('%d.%m')})",
-                 2: f"Післязавтра ({d.strftime('%d.%m')})",}[i]
+                 2: f"Післязавтра ({d.strftime('%d.%m')})"}[i]
         buttons.append([InlineKeyboardButton(text=label, callback_data=f"day_{i}")])
     
-    # Кнопка "Назад" до вибору риби
     buttons.append([InlineKeyboardButton(text="◀️ Назад (до вибору риби)", callback_data="back_to_fish")])
 
     await message.answer(f"Риба: <b>{message.text}</b>\nОберіть день:",
@@ -616,7 +617,7 @@ async def handle_back_to_day(callback: CallbackQuery, state: FSMContext):
         d = today + timedelta(days=i)
         label = {0: f"Сьогодні ({d.strftime('%d.%m')})",
                  1: f"Завтра ({d.strftime('%d.%m')})",
-                 2: f"Післязавтра ({d.strftime('%d.%m')})",}[i]
+                 2: f"Післязавтра ({d.strftime('%d.%m')})"}[i]
         buttons.append([InlineKeyboardButton(text=label, callback_data=f"day_{i}")])
     buttons.append([InlineKeyboardButton(text="◀️ Назад (до вибору риби)", callback_data="back_to_fish")])
 
@@ -716,11 +717,37 @@ async def fallback(message: Message, state: FSMContext):
         await message.answer("Натисніть /start", reply_markup=get_regions_keyboard())
 
 
+# --- ВЕБСЕРВЕР ДЛЯ RENDER ---
+async def handle_ping(request):
+    return web.Response(text="Bot is running!")
+
+async def web_server():
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    port = int(os.getenv("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logging.info(f"Вебсервер запущено на хості 0.0.0.0 та порту {port}")
+
+
 async def main():
     init_db()
     logging.basicConfig(level=logging.INFO)
+    
+    # Запускаємо фоновий вебсервер для платформи Render
+    asyncio.create_task(web_server())
+    
+    # Видаляємо вебхуки для уникнення конфліктів локального запуску
+    await bot.delete_webhook(drop_pending_updates=True)
+    
     await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        print("Бот зупинений.")
