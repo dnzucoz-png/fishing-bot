@@ -10,8 +10,10 @@ from aiogram.filters import Command
 # Налаштування логування
 logging.basicConfig(level=logging.INFO)
 
-# Отримуємо токен безпечно з налаштувань Render
-TOKEN = os.getenv("8373587458:AAEVFuI-yRfE4vTeKT86idwi-0ytbl122T4")
+import os
+
+# Отримуємо токен з середовища, або вставляємо напряму, якщо середовище не підтягнулось
+TOKEN = os.getenv("BOT_TOKEN") or "8373587458:AAEVFuI-yRfE4vTeKT86idwi-0ytbl122T4"
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
