@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import sqlite3
+import time
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
 
@@ -22,81 +23,49 @@ from aiogram.types import (
     KeyboardButton,
 )
 
+
 # ============================================================
 # НАСТРОЙКИ
 # ============================================================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
-
-logger = logging.getLogger("fishing_bot")
-
-# ------------------------------------------------------------
-# TELEGRAM TOKEN
-# ------------------------------------------------------------
-# На Render создай:
-#
-# BOT_TOKEN = твой токен
-#
-# Если переменной нет, бот не стартует.
-# ------------------------------------------------------------
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 if not BOT_TOKEN:
     raise RuntimeError(
-        "Не задан BOT_TOKEN. "
-        "На Render открой Environment → Add Environment Variable "
-        "и добавь BOT_TOKEN."
+        "Не задан BOT_TOKEN. Добавь BOT_TOKEN в Environment Variables на Render."
     )
 
-
-# ============================================================
-# TELEGRAM / ГРУППА
-# ============================================================
-
 GROUP_CHAT_ID = -1004434293069
-
 GROUP_URL = "https://t.me/+rKxYkNg85aAwNzFi"
 
+PORT = int(os.getenv("PORT", "10000"))
 
-# ============================================================
-# ОБЛАСТИ
-# ============================================================
+# Кеш погоды.
+# 45 минут — нормально для прогноза рыбалки.
+CACHE_TTL = 45 * 60
 
 REGIONS = {
     "Дніпропетровська": {
         "lat": 48.4647,
         "lon": 35.0462,
     },
-
     "Київська": {
         "lat": 50.4501,
         "lon": 30.5234,
     },
-
     "Полтавська": {
         "lat": 49.5895,
         "lon": 34.5514,
     },
-
     "Запорізька": {
         "lat": 47.8388,
         "lon": 35.1396,
     },
-
     "Черкаська": {
         "lat": 49.4444,
         "lon": 32.0598,
     },
 }
-
-
-# ============================================================
-# РЫБА
-# ============================================================
 
 FISH_LIST = [
     "Лящ",
@@ -110,19 +79,15 @@ FISH_LIST = [
 
 
 # ============================================================
-# CACHE
+# ЛОГИ
 # ============================================================
 
-weather_cache = {}
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
 
-# 45 минут
-CACHE_TTL = 45 * 60
-
-# Если Open-Meteo отдал 429,
-# не долбим API снова несколько минут.
-RATE_LIMIT_COOLDOWN = 5 * 60
-
-weather_rate_limit = {}
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -137,23 +102,63 @@ class ForecastStates(StatesGroup):
 
 
 # ============================================================
-# DATABASE
+# КЕШ ПОГОДЫ
+# ============================================================
+
+weather_cache = {}
+
+
+def get_cache_key(lat: float, lon: float) -> str:
+    return f"{lat:.4f}:{lon:.4f}"
+
+
+def get_cached_weather(lat: float, lon: float):
+    key = get_cache_key(lat, lon)
+
+    item = weather_cache.get(key)
+
+    if not item:
+        return None
+
+    data, timestamp = item
+
+    if time.time() - timestamp < CACHE_TTL:
+        logger.info(
+            "Погода взята из кеша: %s",
+            key,
+        )
+        return data
+
+    weather_cache.pop(key, None)
+
+    return None
+
+
+def put_cached_weather(lat: float, lon: float, data):
+    key = get_cache_key(lat, lon)
+
+    weather_cache[key] = (
+        data,
+        time.time(),
+    )
+
+
+# ============================================================
+# БАЗА
 # ============================================================
 
 DB_FILE = "fishing_forecast.db"
 
 
 def get_db():
-    conn = sqlite3.connect(DB_FILE, timeout=30)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=30000")
-    return conn
+    return sqlite3.connect(
+        DB_FILE,
+        timeout=20,
+    )
 
 
 def init_db():
-
     conn = get_db()
-
     cursor = conn.cursor()
 
     cursor.execute(
@@ -203,9 +208,7 @@ def save_forecast_to_db(
     temp,
     stars,
 ):
-
     conn = get_db()
-
     cursor = conn.cursor()
 
     cursor.execute(
@@ -250,9 +253,7 @@ def save_feedback_to_db(
     forecast_id,
     rating,
 ):
-
     conn = get_db()
-
     cursor = conn.cursor()
 
     cursor.execute(
@@ -277,9 +278,7 @@ def save_feedback_to_db(
 
 
 def get_user_history_from_db(user_id):
-
     conn = get_db()
-
     cursor = conn.cursor()
 
     cursor.execute(
@@ -307,8 +306,12 @@ def get_user_history_from_db(user_id):
 
 
 # ============================================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ВСПОМОГАТЕЛЬНЫЕ
 # ============================================================
+
+def safe(value, default):
+    return default if value is None else value
+
 
 def get_wind_direction_text(degrees) -> str:
 
@@ -329,325 +332,260 @@ def get_wind_direction_text(degrees) -> str:
     return directions[round(degrees / 45) % 8]
 
 
-def get_moon_phase_info(date_obj: datetime) -> Tuple[str, int]:
+def get_moon_phase_info(
+    date_obj: datetime,
+) -> Tuple[str, int]:
 
     known_new_moon = datetime(2024, 1, 11)
 
     phase_days = (
         date_obj - known_new_moon
-    ).total_seconds() / 86400 % 29.53
+    ).days % 29.53
 
     if phase_days < 1.8:
         return "Новомісяць 🌑", -6
 
-    elif phase_days < 7.4:
+    if phase_days < 7.4:
         return "Зростаючий місяць 🌒", 4
 
-    elif phase_days < 11.1:
+    if phase_days < 11.1:
         return "Перша чверть 🌓", 6
 
-    elif phase_days < 16.5:
+    if phase_days < 16.5:
         return "Повня 🌕", 10
 
-    elif phase_days < 22.1:
+    if phase_days < 22.1:
         return "Спадаючий місяць 🌖", 5
 
-    elif phase_days < 25.8:
+    if phase_days < 25.8:
         return "Остання чверть 🌗", 3
 
-    else:
-        return "Старий місяць 🌘", -4
+    return "Старий місяць 🌘", -4
 
 
-def check_sun_activity(hour: int) -> Tuple[str, str, int]:
+def check_sun_activity(
+    hour: int,
+) -> Tuple[str, str, int]:
 
     if 4 <= hour <= 7:
-
         return (
             "🌅 Світанок",
             "Максимальна ранкова активність.",
             16,
         )
 
-    elif 19 <= hour <= 21:
-
+    if 19 <= hour <= 21:
         return (
             "🌇 Захід сонця",
             "Вихід хижака та ляща на мілководдя.",
             14,
         )
 
-    elif hour >= 22 or hour < 4:
-
+    if hour >= 22 or hour < 4:
         return (
             "🌙 Ніч",
             "Можливий кльов сома та великого ляща.",
             4,
         )
 
-    else:
-
-        return (
-            "☀️ День",
-            "Стандартна активність.",
-            0,
-        )
+    return (
+        "☀️ День",
+        "Стандартна активність.",
+        0,
+    )
 
 
 # ============================================================
-# WEATHER CLIENT
+# ПОГОДА OPEN-METEO
 # ============================================================
 
-class MultiSourceWeatherClient:
+class WeatherClient:
 
-    def __init__(self, lat: float, lon: float):
+    BASE_URL = "https://api.open-meteo.com/v1/forecast"
 
+    def __init__(
+        self,
+        lat: float,
+        lon: float,
+    ):
         self.lat = lat
         self.lon = lon
 
-        self.cache_key = (
-            f"{round(lat, 4)}_{round(lon, 4)}"
-        )
-
-    # --------------------------------------------------------
-    # Open-Meteo
-    # --------------------------------------------------------
-
-    async def fetch_open_meteo(
+    async def request_weather(
         self,
-        session,
-        model: Optional[str] = None,
+        session: aiohttp.ClientSession,
     ):
 
-        now = datetime.now().timestamp()
+        params = {
+            "latitude": self.lat,
+            "longitude": self.lon,
 
-        # Проверяем cooldown после 429
-        last_limit = weather_rate_limit.get(
-            self.cache_key,
-            0,
-        )
+            "hourly": (
+                "temperature_2m,"
+                "apparent_temperature,"
+                "relative_humidity_2m,"
+                "surface_pressure,"
+                "wind_speed_10m,"
+                "wind_direction_10m,"
+                "cloud_cover,"
+                "precipitation"
+            ),
 
-        if now - last_limit < RATE_LIMIT_COOLDOWN:
+            "timezone": "auto",
 
-            logger.warning(
-                "Open-Meteo cooldown для %s",
-                self.cache_key,
-            )
+            # Нам нужны прошлые данные для анализа давления.
+            "past_days": 2,
 
-            return None
-
-        model_param = ""
-
-        if model:
-            model_param = f"&models={model}"
-
-        url = (
-            "https://api.open-meteo.com/v1/forecast"
-            f"?latitude={self.lat}"
-            f"&longitude={self.lon}"
-            "&hourly="
-            "temperature_2m,"
-            "apparent_temperature,"
-            "relative_humidity_2m,"
-            "surface_pressure,"
-            "wind_speed_10m,"
-            "wind_direction_10m,"
-            "cloud_cover,"
-            "precipitation,"
-            "weather_code"
-            f"{model_param}"
-            "&timezone=auto"
-            "&past_days=2"
-            "&forecast_days=5"
-        )
-
-        for attempt in range(3):
-
-            try:
-
-                timeout = aiohttp.ClientTimeout(
-                    total=20,
-                    connect=8,
-                )
-
-                headers = {
-                    "User-Agent": "FishingForecastBot/1.0"
-                }
-
-                async with session.get(
-                    url,
-                    timeout=timeout,
-                    headers=headers,
-                ) as response:
-
-                    if response.status == 200:
-
-                        data = await response.json()
-
-                        logger.info(
-                            "Open-Meteo OK: %s %s",
-                            self.lat,
-                            self.lon,
-                        )
-
-                        return data
-
-                    if response.status == 429:
-
-                        weather_rate_limit[
-                            self.cache_key
-                        ] = datetime.now().timestamp()
-
-                        logger.error(
-                            "Open-Meteo 429: rate limit"
-                        )
-
-                        return None
-
-                    logger.error(
-                        "Open-Meteo HTTP %s",
-                        response.status,
-                    )
-
-                    if attempt < 2:
-
-                        await asyncio.sleep(
-                            2 + attempt * 2
-                        )
-
-            except asyncio.TimeoutError:
-
-                logger.warning(
-                    "Open-Meteo timeout, attempt %s",
-                    attempt + 1,
-                )
-
-                if attempt < 2:
-                    await asyncio.sleep(2)
-
-            except aiohttp.ClientError as e:
-
-                logger.warning(
-                    "Open-Meteo network error: %s",
-                    e,
-                )
-
-                if attempt < 2:
-                    await asyncio.sleep(2)
-
-            except Exception as e:
-
-                logger.exception(
-                    "Unexpected Open-Meteo error: %s",
-                    e,
-                )
-
-                break
-
-        return None
-
-    # --------------------------------------------------------
-    # Получение погоды
-    # --------------------------------------------------------
-
-    async def get_weather(self):
-
-        now = datetime.now().timestamp()
-
-        # ----------------------------------------------------
-        # CACHE
-        # ----------------------------------------------------
-
-        cached = weather_cache.get(
-            self.cache_key
-        )
-
-        if cached:
-
-            data, timestamp = cached
-
-            if now - timestamp < CACHE_TTL:
-
-                logger.info(
-                    "Weather cache HIT: %s",
-                    self.cache_key,
-                )
-
-                return data
-
-            else:
-
-                logger.info(
-                    "Weather cache expired: %s",
-                    self.cache_key,
-                )
-
-        # ----------------------------------------------------
-        # REQUEST
-        # ----------------------------------------------------
-
-        logger.info(
-            "Weather cache MISS: %s",
-            self.cache_key,
-        )
+            # И следующие 3 дня.
+            "forecast_days": 3,
+        }
 
         try:
 
             timeout = aiohttp.ClientTimeout(
-                total=25
+                total=15,
+                connect=5,
             )
 
-            async with aiohttp.ClientSession(
-                timeout=timeout
-            ) as session:
+            async with session.get(
+                self.BASE_URL,
+                params=params,
+                timeout=timeout,
+                headers={
+                    "User-Agent": "FishingForecastBot/1.0"
+                },
+            ) as response:
 
-                data = await self.fetch_open_meteo(
-                    session
-                )
+                if response.status == 200:
 
-                if data:
+                    data = await response.json()
 
-                    weather_cache[
-                        self.cache_key
-                    ] = (
-                        data,
-                        datetime.now().timestamp(),
+                    logger.info(
+                        "Open-Meteo OK: %.4f %.4f",
+                        self.lat,
+                        self.lon,
                     )
 
                     return data
 
-        except Exception as e:
+                if response.status == 429:
 
-            logger.exception(
-                "Weather session error: %s",
+                    logger.warning(
+                        "Open-Meteo 429: превышен лимит запросов"
+                    )
+
+                    # ВАЖНО:
+                    # НЕ ждём 25/40/55 секунд.
+                    # НЕ долбим API повторно.
+                    return None
+
+                text = await response.text()
+
+                logger.error(
+                    "Open-Meteo HTTP %s: %s",
+                    response.status,
+                    text[:300],
+                )
+
+                return None
+
+        except asyncio.TimeoutError:
+
+            logger.error(
+                "Open-Meteo timeout"
+            )
+
+            return None
+
+        except aiohttp.ClientError as e:
+
+            logger.error(
+                "Open-Meteo connection error: %s",
                 e,
             )
 
+            return None
+
+        except Exception:
+
+            logger.exception(
+                "Unexpected weather error"
+            )
+
+            return None
+
+    async def get_weather(self):
+
+        # ----------------------------------------------------
+        # 1. Сначала кеш
+        # ----------------------------------------------------
+
+        cached = get_cached_weather(
+            self.lat,
+            self.lon,
+        )
+
+        if cached is not None:
+            return cached
+
+        # ----------------------------------------------------
+        # 2. Один запрос
+        # ----------------------------------------------------
+
+        async with aiohttp.ClientSession() as session:
+
+            data = await self.request_weather(
+                session
+            )
+
+        # ----------------------------------------------------
+        # 3. Если получили данные — сохраняем
+        # ----------------------------------------------------
+
+        if data:
+
+            put_cached_weather(
+                self.lat,
+                self.lon,
+                data,
+            )
+
+            return data
+
+        # ----------------------------------------------------
+        # 4. Если API временно не отвечает,
+        #    попробуем вернуть старый кеш,
+        #    даже если TTL уже истёк.
+        # ----------------------------------------------------
+
+        key = get_cache_key(
+            self.lat,
+            self.lon,
+        )
+
+        old = weather_cache.get(key)
+
+        if old:
+
+            logger.warning(
+                "Использую устаревший кеш погоды"
+            )
+
+            return old[0]
+
         return None
 
-    # --------------------------------------------------------
-    # Старое имя оставляем для совместимости
-    # --------------------------------------------------------
-
-    async def get_averaged_weather(self):
-
-        return await self.get_weather()
-
     # ========================================================
-    # SCORE
+    # РАСЧЁТ
     # ========================================================
 
-    def _pressure_score(
+    def pressure_score(
         self,
-        pressure_mm: float,
-        is_predator: bool,
-    ) -> int:
+        pressure_mm,
+        predator,
+    ):
 
-        optimum = (
-            748
-            if is_predator
-            else 752
-        )
+        optimum = 748 if predator else 752
 
         diff = abs(
             pressure_mm - optimum
@@ -656,87 +594,76 @@ class MultiSourceWeatherClient:
         if diff <= 3:
             return 14
 
-        elif diff <= 6:
+        if diff <= 6:
             return 8
 
-        elif diff <= 10:
+        if diff <= 10:
             return 0
 
-        elif diff <= 15:
+        if diff <= 15:
             return -10
 
         return -18
 
-    def _pressure_trend_score(
+    def pressure_trend(
         self,
-        pressures: list,
-        idx: int,
-    ) -> Tuple[str, int]:
+        pressures,
+        index,
+    ):
 
-        if idx < 24:
+        if index < 24:
             return (
                 "Недостатньо даних",
                 0,
             )
 
         recent = [
-            p
-            for p in pressures[
-                idx - 12:idx + 1
-            ]
-            if p is not None
+            x
+            for x in pressures[index - 12:index + 1]
+            if x is not None
         ]
 
         older = [
-            p
-            for p in pressures[
-                idx - 24:idx - 12
-            ]
-            if p is not None
+            x
+            for x in pressures[index - 24:index - 12]
+            if x is not None
         ]
 
-        if len(recent) < 5 or len(older) < 5:
-
+        if (
+            len(recent) < 5
+            or len(older) < 5
+        ):
             return (
                 "Недостатньо даних",
                 0,
             )
 
-        avg_recent = (
-            sum(recent) / len(recent)
-        )
-
-        avg_older = (
-            sum(older) / len(older)
-        )
+        recent_avg = sum(recent) / len(recent)
+        older_avg = sum(older) / len(older)
 
         delta = (
-            avg_recent - avg_older
+            recent_avg - older_avg
         ) * 0.75006
 
         if delta < -2.5:
-
             return (
                 "Сильно падає 📉",
                 12,
             )
 
-        elif delta < -0.8:
-
+        if delta < -0.8:
             return (
                 "Повільно падає 📉",
                 8,
             )
 
-        elif delta > 2.5:
-
+        if delta > 2.5:
             return (
                 "Сильно росте 📈",
                 -6,
             )
 
-        elif delta > 0.8:
-
+        if delta > 0.8:
             return (
                 "Повільно росте 📈",
                 2,
@@ -747,55 +674,45 @@ class MultiSourceWeatherClient:
             10,
         )
 
-    def _stability_score(
+    def stability_score(
         self,
-        pressures: list,
-        idx: int,
-    ) -> Tuple[str, int]:
+        pressures,
+        index,
+    ):
 
-        if idx < 48:
-
+        if index < 48:
             return (
                 "Недостатньо історії",
                 0,
             )
 
-        valid = [
-            p
-            for p in pressures[
-                idx - 48:idx + 1
-            ]
-            if p is not None
+        values = [
+            x
+            for x in pressures[index - 48:index + 1]
+            if x is not None
         ]
 
-        if len(valid) < 20:
-
+        if len(values) < 20:
             return (
                 "Недостатньо даних",
                 0,
             )
 
-        diff = (
-            max(valid) -
-            min(valid)
-        )
+        diff = max(values) - min(values)
 
         if diff <= 4:
-
             return (
                 "Дуже стабільний ✅",
                 12,
             )
 
-        elif diff <= 7:
-
+        if diff <= 7:
             return (
                 "Стабільний",
                 6,
             )
 
-        elif diff <= 11:
-
+        if diff <= 11:
             return (
                 "Помірно мінливий ⚠️",
                 -4,
@@ -806,22 +723,21 @@ class MultiSourceWeatherClient:
             -16,
         )
 
-    def _temperature_score(
+    def temperature_score(
         self,
-        temp: float,
-        water_temp: float,
-        is_predator: bool,
-    ) -> int:
+        water_temp,
+        predator,
+    ):
 
-        if is_predator:
+        if predator:
 
             if 8 <= water_temp <= 16:
                 return 12
 
-            elif 5 <= water_temp <= 20:
+            if 5 <= water_temp <= 20:
                 return 6
 
-            elif (
+            if (
                 water_temp > 24
                 or water_temp < 3
             ):
@@ -834,10 +750,10 @@ class MultiSourceWeatherClient:
             if 16 <= water_temp <= 23:
                 return 12
 
-            elif 12 <= water_temp <= 26:
+            if 12 <= water_temp <= 26:
                 return 6
 
-            elif (
+            if (
                 water_temp > 28
                 or water_temp < 8
             ):
@@ -845,30 +761,28 @@ class MultiSourceWeatherClient:
 
             return 0
 
-    def _wind_score(
+    def wind_score(
         self,
-        wind_ms: float,
-        wind_dir: str,
-        is_predator: bool,
-    ) -> int:
+        wind,
+        direction,
+        predator,
+    ):
 
-        if wind_ms < 1.5:
+        if wind < 1.5:
 
             score = (
-                -4
-                if is_predator
-                else 2
+                -4 if predator else 2
             )
 
-        elif 2.0 <= wind_ms <= 5.5:
+        elif 2 <= wind <= 5.5:
 
             score = 10
 
-        elif 5.5 < wind_ms <= 7.5:
+        elif 5.5 < wind <= 7.5:
 
             score = 2
 
-        elif wind_ms > 9:
+        elif wind > 9:
 
             score = -22
 
@@ -876,60 +790,53 @@ class MultiSourceWeatherClient:
 
             score = -8
 
-        if wind_dir in {
+        if direction in {
             "Пд",
             "Пд-Зх",
             "Зх",
             "Пд-Сх",
         }:
-
             score += 4
 
-        elif wind_dir in {
+        elif direction in {
             "Пн",
             "Пн-Сх",
         }:
-
             score -= 3
 
         return score
 
-    def _precip_score(
+    def precipitation_score(
         self,
-        precip: float,
-        is_predator: bool,
-    ) -> int:
+        precip,
+        predator,
+    ):
 
         if precip <= 0.1:
-
             return 0
 
-        elif 0.2 <= precip <= 1.8:
-
+        if 0.2 <= precip <= 1.8:
             return (
-                7
-                if is_predator
-                else 4
+                7 if predator else 4
             )
 
-        elif precip <= 3.5:
-
+        if precip <= 3.5:
             return -6
 
         return -16
 
-    def _cloud_score(
+    def cloud_score(
         self,
-        cloud: float,
-        is_predator: bool,
-    ) -> int:
+        cloud,
+        predator,
+    ):
 
-        if is_predator:
+        if predator:
 
             if cloud >= 70:
                 return 9
 
-            elif cloud >= 40:
+            if cloud >= 40:
                 return 4
 
             return -3
@@ -939,110 +846,352 @@ class MultiSourceWeatherClient:
             if cloud >= 80:
                 return 2
 
-            elif cloud <= 30:
+            if cloud <= 30:
                 return 3
 
             return 0
 
-    def calculate_star_score(
+    def stars(
         self,
-        score_100: float,
-    ) -> int:
+        score,
+    ):
 
-        if score_100 >= 84:
+        if score >= 84:
             return 5
 
-        elif score_100 >= 68:
+        if score >= 68:
             return 4
 
-        elif score_100 >= 50:
+        if score >= 50:
             return 3
 
-        elif score_100 >= 32:
+        if score >= 32:
             return 2
 
-        elif score_100 > 12:
+        if score > 12:
             return 1
 
         return 0
 
     # ========================================================
-    # COMMENTARY
+    # ПРОГНОЗ
     # ========================================================
 
-    def generate_expert_commentary(
+    async def evaluate(
         self,
         fish_type,
-        pressure_mm,
-        trend_text,
-        stability_text,
-        wind_ms,
-        wind_dir,
-        precip,
-        sun_title,
-        sun_desc,
-        temp,
-        water_temp,
-        score,
-        humidity,
-        cloud_cover,
-        moon_text,
+        target_hour,
+        day_offset,
     ):
 
-        comments = [
-            (
-                f"⏱ <b>Час:</b> "
-                f"{sun_title}. "
-                f"{sun_desc}"
-            ),
+        data = await self.get_weather()
 
-            (
-                f"🌕 <b>Місяць:</b> "
-                f"{moon_text}"
-            ),
+        if not data:
+            return None
 
-            (
-                f"🌀 <b>Тиск:</b> "
-                f"{pressure_mm} мм | "
-                f"{trend_text} | "
-                f"{stability_text}"
-            ),
+        hourly = data.get("hourly")
 
-            (
-                f"🌡 <b>Температура:</b> "
-                f"повітря {temp}°C, "
-                f"вода ~{water_temp}°C"
+        if not hourly:
+            logger.error(
+                "Open-Meteo returned no hourly data"
+            )
+            return None
+
+        pressures = hourly.get(
+            "surface_pressure",
+            [],
+        )
+
+        if not pressures:
+            return None
+
+        max_index = len(pressures) - 1
+
+        # ----------------------------------------------------
+        # ВАЖНО
+        #
+        # past_days=2 => первые 48 часов истории.
+        #
+        # Поэтому:
+        # 48 + day*24 + hour
+        # ----------------------------------------------------
+
+        target_index = (
+            48
+            + day_offset * 24
+            + target_hour
+        )
+
+        target_index = max(
+            0,
+            min(
+                target_index,
+                max_index,
             ),
-        ]
+        )
+
+        pressure_hpa = safe(
+            pressures[target_index],
+            1013.25,
+        )
+
+        pressure_mm = (
+            pressure_hpa * 0.75006
+        )
+
+        temperatures = hourly.get(
+            "temperature_2m",
+            [],
+        )
+
+        winds = hourly.get(
+            "wind_speed_10m",
+            [],
+        )
+
+        wind_directions = hourly.get(
+            "wind_direction_10m",
+            [],
+        )
+
+        humidity_values = hourly.get(
+            "relative_humidity_2m",
+            [],
+        )
+
+        clouds = hourly.get(
+            "cloud_cover",
+            [],
+        )
+
+        precipitation = hourly.get(
+            "precipitation",
+            [],
+        )
+
+        temp = safe(
+            temperatures[target_index]
+            if target_index < len(temperatures)
+            else None,
+            18.0,
+        )
+
+        wind = safe(
+            winds[target_index]
+            if target_index < len(winds)
+            else None,
+            2.5,
+        )
+
+        wind_degree = safe(
+            wind_directions[target_index]
+            if target_index < len(wind_directions)
+            else None,
+            0,
+        )
+
+        humidity = safe(
+            humidity_values[target_index]
+            if target_index < len(humidity_values)
+            else None,
+            55,
+        )
+
+        cloud = safe(
+            clouds[target_index]
+            if target_index < len(clouds)
+            else None,
+            40,
+        )
+
+        precip = safe(
+            precipitation[target_index]
+            if target_index < len(precipitation)
+            else None,
+            0,
+        )
+
+        wind_dir = get_wind_direction_text(
+            wind_degree
+        )
+
+        # ----------------------------------------------------
+        # Вода
+        #
+        # Open-Meteo не даёт SST для речной точки.
+        # Поэтому используем оценочную температуру.
+        # ----------------------------------------------------
+
+        water_temp = round(
+            temp * 0.82 + 3.2,
+            1,
+        )
+
+        predator = fish_type in {
+            "Щука",
+            "Окунь",
+            "Сом",
+        }
+
+        score = 48
+
+        stability_text, stability_points = (
+            self.stability_score(
+                pressures,
+                target_index,
+            )
+        )
+
+        score += stability_points
+
+        trend_text, trend_points = (
+            self.pressure_trend(
+                pressures,
+                target_index,
+            )
+        )
+
+        score += trend_points
+
+        score += self.pressure_score(
+            pressure_mm,
+            predator,
+        )
+
+        score += self.temperature_score(
+            water_temp,
+            predator,
+        )
+
+        score += self.wind_score(
+            wind,
+            wind_dir,
+            predator,
+        )
+
+        score += self.precipitation_score(
+            precip,
+            predator,
+        )
+
+        score += self.cloud_score(
+            cloud,
+            predator,
+        )
+
+        sun_title, sun_desc, sun_points = (
+            check_sun_activity(
+                target_hour
+            )
+        )
+
+        score += sun_points
+
+        target_date = (
+            datetime.now()
+            + timedelta(days=day_offset)
+        )
+
+        moon_text, moon_points = (
+            get_moon_phase_info(
+                target_date
+            )
+        )
+
+        score += (
+            moon_points
+            if predator
+            else int(moon_points * 0.5)
+        )
+
+        final_score = max(
+            0,
+            min(
+                100,
+                int(score),
+            ),
+        )
+
+        stars = self.stars(
+            final_score
+        )
+
+        date_str = target_date.strftime(
+            "%d.%m.%Y"
+        )
+
+        if day_offset == 0:
+            day_text = f"Сьогодні ({date_str})"
+
+        elif day_offset == 1:
+            day_text = f"Завтра ({date_str})"
+
+        else:
+            day_text = (
+                f"Післязавтра ({date_str})"
+            )
+
+        # ----------------------------------------------------
+        # КОММЕНТАРИЙ
+        # ----------------------------------------------------
+
+        comments = []
+
+        comments.append(
+            f"⏱ <b>Час:</b> "
+            f"{sun_title}. "
+            f"{sun_desc}"
+        )
+
+        comments.append(
+            f"🌕 <b>Місяць:</b> "
+            f"{moon_text}"
+        )
+
+        comments.append(
+            f"🌀 <b>Тиск:</b> "
+            f"{pressure_mm:.1f} мм | "
+            f"{trend_text} | "
+            f"{stability_text}"
+        )
+
+        comments.append(
+            f"🌡 <b>Температура:</b> "
+            f"повітря {temp:.1f}°C, "
+            f"вода ~{water_temp:.1f}°C"
+        )
 
         if water_temp > 25:
 
             comments.append(
                 "• Спека — шукайте тінь, "
-                "глибину та течію."
+                "глибину або течію."
             )
 
         elif water_temp < 9:
 
             comments.append(
                 "• Холодна вода — "
-                "дрібні наживки, "
-                "повільна подача."
+                "дрібна наживка "
+                "і повільна подача."
             )
 
-        if wind_ms < 2:
+        if wind < 2:
 
             comments.append(
-                f"💨 <b>Вітер:</b> штиль "
-                f"({wind_ms} м/с, {wind_dir})."
+                f"💨 <b>Вітер:</b> "
+                f"штиль "
+                f"({wind:.1f} м/с, "
+                f"{wind_dir})"
             )
 
-        elif wind_ms <= 6:
+        elif wind <= 6:
 
             comments.append(
                 f"💨 <b>Вітер:</b> "
                 f"сприятливий "
-                f"({wind_ms} м/с, {wind_dir})."
+                f"({wind:.1f} м/с, "
+                f"{wind_dir})"
             )
 
         else:
@@ -1050,30 +1199,25 @@ class MultiSourceWeatherClient:
             comments.append(
                 f"💨 <b>Вітер:</b> "
                 f"сильний "
-                f"({wind_ms} м/с, {wind_dir})."
+                f"({wind:.1f} м/с, "
+                f"{wind_dir})"
             )
 
         if precip > 1.5:
 
             comments.append(
                 f"🌧 <b>Опади:</b> "
-                f"{precip} мм."
+                f"{precip:.1f} мм"
             )
 
-        elif cloud_cover > 65:
+        if cloud > 65:
 
             comments.append(
                 f"☁️ <b>Хмарність:</b> "
-                f"{cloud_cover}%."
+                f"{cloud:.0f}%"
             )
 
-        is_pred = fish_type in {
-            "Щука",
-            "Окунь",
-            "Сом",
-        }
-
-        if is_pred:
+        if predator:
 
             comments.append(
                 f"🎯 <b>Для {fish_type}:</b> "
@@ -1089,20 +1233,21 @@ class MultiSourceWeatherClient:
                 f"мотиль/опариш/кукурудза."
             )
 
-        if score >= 78:
+        if final_score >= 78:
 
             comments.append(
                 "🏆 <b>Підсумок:</b> "
                 "Відмінні умови! "
-                "Можна їхати на водойму."
+                "Вирушайте на водойму."
             )
 
-        elif score >= 55:
+        elif final_score >= 55:
 
             comments.append(
                 "⚖️ <b>Підсумок:</b> "
                 "Добрі умови. "
-                "Багато залежить від місця."
+                "Успіх залежить "
+                "від місця і наживки."
             )
 
         else:
@@ -1110,506 +1255,74 @@ class MultiSourceWeatherClient:
             comments.append(
                 "⚠️ <b>Підсумок:</b> "
                 "Складні умови. "
-                "Потрібні місце і терпіння."
+                "Потрібні майстерність "
+                "і терпіння."
             )
 
-        return "\n".join(comments)
-
-    # ========================================================
-    # НАХОЖДЕНИЕ НУЖНОГО ЧАСА
-    # ========================================================
-
-    def find_target_index(
-        self,
-        hourly,
-        target_datetime: datetime,
-    ):
-
-        times = hourly.get("time", [])
-
-        if not times:
-            return None
-
-        target_str = (
-            target_datetime.strftime(
-                "%Y-%m-%dT%H:00"
-            )
-        )
-
-        # Точное совпадение
-        for index, value in enumerate(times):
-
-            if value == target_str:
-                return index
-
-        # Если точного совпадения нет,
-        # ищем ближайшее время.
-        best_index = None
-        best_diff = None
-
-        for index, value in enumerate(times):
-
-            try:
-
-                dt = datetime.fromisoformat(
-                    value
-                )
-
-                diff = abs(
-                    (
-                        dt -
-                        target_datetime
-                    ).total_seconds()
-                )
-
-                if (
-                    best_diff is None
-                    or diff < best_diff
-                ):
-
-                    best_diff = diff
-                    best_index = index
-
-            except Exception:
-                continue
-
-        return best_index
-
-    # ========================================================
-    # ОЦЕНКА КЛЕВА
-    # ========================================================
-
-    async def evaluate_biting(
-        self,
-        fish_type: str,
-        region: str,
-        target_hour: int,
-        day_offset: int = 0,
-    ):
-
-        data = await self.get_weather()
-
-        if not data:
-
-            return None
-
-        hourly = data.get("hourly")
-
-        if not hourly:
-
-            logger.error(
-                "Open-Meteo response has no hourly"
-            )
-
-            return None
-
-        # ----------------------------------------------------
-        # ЦЕЛЕВАЯ ДАТА
-        # ----------------------------------------------------
-
-        today = datetime.now()
-
-        target_datetime = (
-            today.replace(
-                hour=target_hour,
-                minute=0,
-                second=0,
-                microsecond=0,
-            )
-            + timedelta(days=day_offset)
-        )
-
-        target_index = self.find_target_index(
-            hourly,
-            target_datetime,
-        )
-
-        if target_index is None:
-
-            logger.error(
-                "Не найден час %s",
-                target_datetime,
-            )
-
-            return None
-
-        logger.info(
-            "Forecast target: %s index=%s",
-            target_datetime,
-            target_index,
-        )
-
-        # ----------------------------------------------------
-        # SAFE
-        # ----------------------------------------------------
-
-        def safe(
-            values,
-            index,
-            default,
-        ):
-
-            try:
-
-                value = values[index]
-
-                if value is None:
-                    return default
-
-                return value
-
-            except Exception:
-
-                return default
-
-        pressures = hourly.get(
-            "surface_pressure",
-            [],
-        )
-
-        pressure_hpa = safe(
-            pressures,
-            target_index,
-            1013.25,
-        )
-
-        pressure_mm = (
-            pressure_hpa * 0.75006
-        )
-
-        wind_values = hourly.get(
-            "wind_speed_10m",
-            [],
-        )
-
-        wind_ms = safe(
-            wind_values,
-            target_index,
-            2.5,
-        )
-
-        temp_values = hourly.get(
-            "temperature_2m",
-            [],
-        )
-
-        temp = safe(
-            temp_values,
-            target_index,
-            18.0,
-        )
-
-        precip_values = hourly.get(
-            "precipitation",
-            [],
-        )
-
-        precip = safe(
-            precip_values,
-            target_index,
-            0.0,
-        )
-
-        wind_direction_values = hourly.get(
-            "wind_direction_10m",
-            [],
-        )
-
-        wind_degrees = safe(
-            wind_direction_values,
-            target_index,
-            0,
-        )
-
-        wind_dir = get_wind_direction_text(
-            wind_degrees
-        )
-
-        humidity_values = hourly.get(
-            "relative_humidity_2m",
-            [],
-        )
-
-        humidity = safe(
-            humidity_values,
-            target_index,
-            55,
-        )
-
-        cloud_values = hourly.get(
-            "cloud_cover",
-            [],
-        )
-
-        cloud_cover = safe(
-            cloud_values,
-            target_index,
-            40,
-        )
-
-        # ----------------------------------------------------
-        # ВОДА
-        # ----------------------------------------------------
-        #
-        # Open-Meteo для речного места не даёт
-        # реальную температуру воды.
-        #
-        # Поэтому здесь используем приблизительную модель.
-        # ----------------------------------------------------
-
-        water_temp = round(
-            temp * 0.82 + 3.2,
-            1,
-        )
-
-        is_predator = fish_type in {
-            "Щука",
-            "Окунь",
-            "Сом",
-        }
-
-        # ----------------------------------------------------
-        # SCORE
-        # ----------------------------------------------------
-
-        score = 48
-
-        stab_text, stab_pts = (
-            self._stability_score(
-                pressures,
-                target_index,
-            )
-        )
-
-        score += stab_pts
-
-        trend_text, trend_pts = (
-            self._pressure_trend_score(
-                pressures,
-                target_index,
-            )
-        )
-
-        score += trend_pts
-
-        score += self._pressure_score(
-            pressure_mm,
-            is_predator,
-        )
-
-        score += self._temperature_score(
-            temp,
-            water_temp,
-            is_predator,
-        )
-
-        score += self._wind_score(
-            wind_ms,
-            wind_dir,
-            is_predator,
-        )
-
-        score += self._precip_score(
-            precip,
-            is_predator,
-        )
-
-        score += self._cloud_score(
-            cloud_cover,
-            is_predator,
-        )
-
-        sun_title, sun_desc, sun_pts = (
-            check_sun_activity(
-                target_hour
-            )
-        )
-
-        score += sun_pts
-
-        moon_text, moon_pts = (
-            get_moon_phase_info(
-                target_datetime
-            )
-        )
-
-        if is_predator:
-
-            score += moon_pts
-
-        else:
-
-            score += int(
-                moon_pts * 0.5
-            )
-
-        final_score = min(
-            100,
-            max(
-                0,
-                score,
-            ),
-        )
-
-        stars = self.calculate_star_score(
-            final_score
-        )
-
-        # ----------------------------------------------------
-        # DATE
-        # ----------------------------------------------------
-
-        date_str = target_datetime.strftime(
-            "%d.%m.%Y"
-        )
-
-        if day_offset == 0:
-
-            day_text = (
-                f"Сьогодні ({date_str})"
-            )
-
-        elif day_offset == 1:
-
-            day_text = (
-                f"Завтра ({date_str})"
-            )
-
-        else:
-
-            day_text = (
-                f"Післязавтра ({date_str})"
-            )
-
-        # ----------------------------------------------------
-        # COMMENTARY
-        # ----------------------------------------------------
-
-        commentary = (
-            self.generate_expert_commentary(
-                fish_type,
-                round(
-                    pressure_mm,
-                    1,
-                ),
-                trend_text,
-                stab_text,
-                round(
-                    wind_ms,
-                    1,
-                ),
-                wind_dir,
-                round(
-                    precip,
-                    1,
-                ),
-                sun_title,
-                sun_desc,
-                round(
-                    temp,
-                    1,
-                ),
-                round(
-                    water_temp,
-                    1,
-                ),
-                final_score,
-                round(
-                    humidity
-                ),
-                round(
-                    cloud_cover
-                ),
-                moon_text,
-            )
+        commentary = "\n".join(
+            comments
         )
 
         return {
             "fish": fish_type,
             "forecast_day": day_text,
             "hour": target_hour,
-
             "pressure_mm": round(
                 pressure_mm,
                 1,
             ),
-
-            "pressure_stability":
-                stab_text,
-
-            "pressure_trend":
-                trend_text,
-
+            "pressure_stability": stability_text,
+            "pressure_trend": trend_text,
             "wind_ms": round(
-                wind_ms,
+                wind,
                 1,
             ),
-
-            "wind_dir":
-                wind_dir,
-
-            "humidity":
-                round(humidity),
-
-            "cloud_cover":
-                round(cloud_cover),
-
-            "precipitation":
-                round(
-                    precip,
-                    1,
-                ),
-
-            "temperature":
-                round(
-                    temp,
-                    1,
-                ),
-
-            "water_temp":
-                round(
-                    water_temp,
-                    1,
-                ),
-
-            "moon_phase":
-                moon_text,
-
-            "stars":
-                stars,
-
-            "stars_graphic":
+            "wind_dir": wind_dir,
+            "humidity": round(
+                humidity,
+            ),
+            "cloud_cover": round(
+                cloud,
+            ),
+            "precipitation": round(
+                precip,
+                1,
+            ),
+            "temperature": round(
+                temp,
+                1,
+            ),
+            "water_temp": round(
+                water_temp,
+                1,
+            ),
+            "moon_phase": moon_text,
+            "stars": stars,
+            "stars_graphic": (
                 "⭐" * stars
-                + "☆" * (5 - stars),
-
-            "expert_commentary":
-                commentary,
-
-            "sources_used":
-                "Open-Meteo",
-
-            "score_100":
-                final_score,
+                + "☆" * (5 - stars)
+            ),
+            "expert_commentary": commentary,
+            "sources_used": "Open-Meteo",
+            "score_100": final_score,
         }
 
 
 # ============================================================
-# BOT
+# TELEGRAM
 # ============================================================
 
 bot = Bot(
     token=BOT_TOKEN
 )
 
-storage = MemoryStorage()
-
 dp = Dispatcher(
-    storage=storage
+    storage=MemoryStorage()
 )
 
 
 # ============================================================
-# KEYBOARDS
+# КЛАВИАТУРЫ
 # ============================================================
 
 def get_regions_keyboard():
@@ -1624,7 +1337,6 @@ def get_regions_keyboard():
                     text="Київська"
                 ),
             ],
-
             [
                 KeyboardButton(
                     text="Полтавська"
@@ -1633,13 +1345,11 @@ def get_regions_keyboard():
                     text="Запорізька"
                 ),
             ],
-
             [
                 KeyboardButton(
                     text="Черкаська"
                 ),
             ],
-
             [
                 KeyboardButton(
                     text="📜 Моя історія"
@@ -1668,7 +1378,6 @@ def get_fish_keyboard():
                     text="Короп"
                 ),
             ],
-
             [
                 KeyboardButton(
                     text="Щука"
@@ -1680,14 +1389,10 @@ def get_fish_keyboard():
                     text="Сом"
                 ),
             ],
-
             [
                 KeyboardButton(
                     text="Плотва"
                 ),
-            ],
-
-            [
                 KeyboardButton(
                     text="◀️ Змінити область"
                 ),
@@ -1701,7 +1406,9 @@ def get_fish_keyboard():
 # START
 # ============================================================
 
-@dp.message(Command("start"))
+@dp.message(
+    Command("start")
+)
 async def cmd_start(
     message: Message,
     state: FSMContext,
@@ -1715,7 +1422,8 @@ async def cmd_start(
 
     await message.answer(
         "Привіт! 🎣\n\n"
-        "Оберіть область для прогнозу кльову:",
+        "Оберіть область "
+        "для прогнозу кльову:",
         reply_markup=get_regions_keyboard(),
     )
 
@@ -1724,34 +1432,28 @@ async def cmd_start(
 # HELP
 # ============================================================
 
-@dp.message(Command("help"))
-@dp.message(F.text == "ℹ️ Допомога")
+@dp.message(
+    Command("help")
+)
+@dp.message(
+    F.text == "ℹ️ Допомога"
+)
 async def cmd_help(
     message: Message,
 ):
 
-    text = (
-        "<b>🎣 Як працює прогноз кльову</b>\n\n"
-
-        "• Стабільність тиску\n"
+    await message.answer(
+        "<b>🎣 Як працює прогноз</b>\n\n"
+        "• Тиск\n"
         "• Тренд тиску\n"
-        "• Атмосферний тиск\n"
+        "• Стабільність тиску\n"
         "• Температура\n"
         "• Вітер\n"
         "• Опади\n"
         "• Хмарність\n"
         "• Час доби\n"
         "• Фаза місяця\n\n"
-
-        "<b>Джерело погоди:</b>\n"
-        "Open-Meteo\n\n"
-
-        "⚠️ Прогноз кльову є розрахунковим "
-        "і не гарантує улов."
-    )
-
-    await message.answer(
-        text,
+        "🌦 Джерело: Open-Meteo",
         parse_mode="HTML",
     )
 
@@ -1760,29 +1462,16 @@ async def cmd_help(
 # HISTORY
 # ============================================================
 
-@dp.message(F.text == "📜 Моя історія")
+@dp.message(
+    F.text == "📜 Моя історія"
+)
 async def show_history(
     message: Message,
 ):
 
-    try:
-
-        rows = get_user_history_from_db(
-            message.from_user.id
-        )
-
-    except Exception as e:
-
-        logger.exception(
-            "History error: %s",
-            e,
-        )
-
-        await message.answer(
-            "❌ Не вдалося отримати історію."
-        )
-
-        return
+    rows = get_user_history_from_db(
+        message.from_user.id
+    )
 
     if not rows:
 
@@ -1815,19 +1504,16 @@ async def show_history(
             + "☆" * (5 - stars)
         )
 
-        if hour is not None:
-
-            hour_str = (
-                f"{hour:02d}:00"
-            )
-
-        else:
-
-            hour_str = "—"
+        hour_text = (
+            f"{hour:02d}:00"
+            if hour is not None
+            else "—"
+        )
 
         text += (
-            f"📍 {region} | 🎣 {fish}\n"
-            f"{day} о {hour_str}\n"
+            f"📍 {region}\n"
+            f"🎣 {fish}\n"
+            f"{day} о {hour_text}\n"
             f"Оцінка: {graphic}\n"
             f"🕒 {timestamp}\n\n"
         )
@@ -1903,7 +1589,7 @@ async def handle_fish(
 
         await message.answer(
             "Спочатку оберіть область "
-            "через /start."
+            "через /start"
         )
 
         return
@@ -1922,29 +1608,26 @@ async def handle_fish(
 
     for i in range(3):
 
-        d = today + timedelta(
+        date = today + timedelta(
             days=i
         )
 
         if i == 0:
-
             label = (
                 f"Сьогодні "
-                f"({d.strftime('%d.%m')})"
+                f"({date.strftime('%d.%m')})"
             )
 
         elif i == 1:
-
             label = (
                 f"Завтра "
-                f"({d.strftime('%d.%m')})"
+                f"({date.strftime('%d.%m')})"
             )
 
         else:
-
             label = (
                 f"Післязавтра "
-                f"({d.strftime('%d.%m')})"
+                f"({date.strftime('%d.%m')})"
             )
 
         buttons.append(
@@ -1966,7 +1649,7 @@ async def handle_fish(
     )
 
     await message.answer(
-        f"Риба: "
+        f"🎣 Риба: "
         f"<b>{message.text}</b>\n\n"
         f"Оберіть день:",
         reply_markup=InlineKeyboardMarkup(
@@ -1977,13 +1660,13 @@ async def handle_fish(
 
 
 # ============================================================
-# BACK TO FISH
+# BACK FISH
 # ============================================================
 
 @dp.callback_query(
     F.data == "back_to_fish"
 )
-async def handle_back_to_fish(
+async def back_to_fish(
     callback: CallbackQuery,
     state: FSMContext,
 ):
@@ -2012,20 +1695,9 @@ async def handle_day(
     state: FSMContext,
 ):
 
-    try:
-
-        day_offset = int(
-            callback.data.split("_")[1]
-        )
-
-    except Exception:
-
-        await callback.answer(
-            "Помилка.",
-            show_alert=True,
-        )
-
-        return
+    day_offset = int(
+        callback.data.split("_")[1]
+    )
 
     await state.update_data(
         day_offset=day_offset
@@ -2035,7 +1707,7 @@ async def handle_day(
         ForecastStates.choosing_hour
     )
 
-    kb = InlineKeyboardMarkup(
+    keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
@@ -2043,21 +1715,18 @@ async def handle_day(
                     callback_data="hour_6",
                 )
             ],
-
             [
                 InlineKeyboardButton(
                     text="☀️ День (12:00)",
                     callback_data="hour_12",
                 )
             ],
-
             [
                 InlineKeyboardButton(
                     text="🌇 Захід (20:00)",
                     callback_data="hour_20",
                 )
             ],
-
             [
                 InlineKeyboardButton(
                     text="◀️ Назад",
@@ -2069,33 +1738,33 @@ async def handle_day(
 
     await callback.message.edit_text(
         "Оберіть час доби:",
-        reply_markup=kb,
+        reply_markup=keyboard,
     )
 
     await callback.answer()
 
 
 # ============================================================
-# BACK TO DAY
+# BACK DAY
 # ============================================================
 
 @dp.callback_query(
     F.data == "back_to_day"
 )
-async def handle_back_to_day(
+async def back_to_day(
     callback: CallbackQuery,
     state: FSMContext,
 ):
 
-    await state.set_state(
-        ForecastStates.choosing_day
-    )
-
     data = await state.get_data()
 
-    fish_type = data.get(
+    fish = data.get(
         "fish",
         "Рибу",
+    )
+
+    await state.set_state(
+        ForecastStates.choosing_day
     )
 
     today = datetime.now()
@@ -2104,29 +1773,26 @@ async def handle_back_to_day(
 
     for i in range(3):
 
-        d = today + timedelta(
+        date = today + timedelta(
             days=i
         )
 
         if i == 0:
-
             label = (
                 f"Сьогодні "
-                f"({d.strftime('%d.%m')})"
+                f"({date.strftime('%d.%m')})"
             )
 
         elif i == 1:
-
             label = (
                 f"Завтра "
-                f"({d.strftime('%d.%m')})"
+                f"({date.strftime('%d.%m')})"
             )
 
         else:
-
             label = (
                 f"Післязавтра "
-                f"({d.strftime('%d.%m')})"
+                f"({date.strftime('%d.%m')})"
             )
 
         buttons.append(
@@ -2148,8 +1814,8 @@ async def handle_back_to_day(
     )
 
     await callback.message.edit_text(
-        f"Риба: "
-        f"<b>{fish_type}</b>\n\n"
+        f"🎣 Риба: "
+        f"<b>{fish}</b>\n\n"
         f"Оберіть день:",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=buttons
@@ -2161,7 +1827,7 @@ async def handle_back_to_day(
 
 
 # ============================================================
-# HOUR / MAIN FORECAST
+# HOUR
 # ============================================================
 
 @dp.callback_query(
@@ -2172,20 +1838,9 @@ async def handle_hour(
     state: FSMContext,
 ):
 
-    try:
-
-        hour = int(
-            callback.data.split("_")[1]
-        )
-
-    except Exception:
-
-        await callback.answer(
-            "Помилка часу.",
-            show_alert=True,
-        )
-
-        return
+    hour = int(
+        callback.data.split("_")[1]
+    )
 
     data = await state.get_data()
 
@@ -2193,7 +1848,7 @@ async def handle_hour(
         "region"
     )
 
-    fish_type = data.get(
+    fish = data.get(
         "fish"
     )
 
@@ -2204,138 +1859,89 @@ async def handle_hour(
 
     if region not in REGIONS:
 
-        await callback.message.answer(
-            "❌ Область не вибрана. "
-            "Натисніть /start."
+        await callback.answer(
+            "Область не выбрана",
+            show_alert=True,
         )
-
-        await state.clear()
-        await callback.answer()
 
         return
 
-    if fish_type not in FISH_LIST:
+    if fish not in FISH_LIST:
 
-        await callback.message.answer(
-            "❌ Риба не вибрана. "
-            "Натисніть /start."
+        await callback.answer(
+            "Риба не выбрана",
+            show_alert=True,
         )
-
-        await state.clear()
-        await callback.answer()
 
         return
 
-    coords = REGIONS[
-        region
-    ]
+    await callback.message.edit_text(
+        "⏳ <b>Аналізую погоду...</b>\n\n"
+        "Це може зайняти кілька секунд.",
+        parse_mode="HTML",
+    )
 
-    client = MultiSourceWeatherClient(
+    coords = REGIONS[region]
+
+    client = WeatherClient(
         coords["lat"],
         coords["lon"],
     )
 
-    await callback.message.edit_text(
-        "⏳ <b>Аналізую погоду...</b>\n\n"
-        "Отримую метеодані та "
-        "розраховую кльов 🎣",
-        parse_mode="HTML",
-    )
-
     try:
 
-        result = await asyncio.wait_for(
-            client.evaluate_biting(
-                fish_type,
-                region,
-                hour,
-                day_offset,
-            ),
-            timeout=40,
+        result = await client.evaluate(
+            fish,
+            hour,
+            day_offset,
         )
 
-    except asyncio.TimeoutError:
-
-        logger.error(
-            "Forecast timeout"
-        )
-
-        await callback.message.answer(
-            "❌ Open-Meteo занадто довго "
-            "не відповідає.\n\n"
-            "Спробуйте ще раз через кілька хвилин.",
-            reply_markup=get_regions_keyboard(),
-        )
-
-        await state.clear()
-        await callback.answer()
-
-        return
-
-    except Exception as e:
+    except Exception:
 
         logger.exception(
-            "Forecast calculation error: %s",
-            e,
+            "Forecast calculation error"
         )
 
-        await callback.message.answer(
-            "❌ Помилка під час розрахунку "
-            "прогнозу.",
-            reply_markup=get_regions_keyboard(),
-        )
-
-        await state.clear()
-        await callback.answer()
-
-        return
+        result = None
 
     if not result:
 
-        await callback.message.answer(
-            "❌ Не вдалося отримати "
-            "метеодані.\n\n"
-            "Open-Meteo тимчасово обмежив "
-            "запити або не відповідає.\n\n"
-            "Спробуйте ще раз через "
-            "кілька хвилин.",
-            reply_markup=get_regions_keyboard(),
+        await callback.message.edit_text(
+            "⚠️ <b>Погодний сервіс тимчасово "
+            "не відповідає.</b>\n\n"
+            "Open-Meteo зараз повертає "
+            "обмеження запитів (429) "
+            "або тимчасово недоступний.\n\n"
+            "Кешу для цієї області поки немає.\n"
+            "Спробуйте повторити прогноз "
+            "через кілька хвилин.",
+            parse_mode="HTML",
         )
 
         await state.clear()
+
         await callback.answer()
 
         return
 
     # --------------------------------------------------------
-    # SAVE
+    # Сохраняем прогноз
     # --------------------------------------------------------
 
-    try:
-
-        forecast_id = save_forecast_to_db(
-            callback.from_user.id,
-            region,
-            fish_type,
-            result["forecast_day"],
-            result["hour"],
-            result["pressure_mm"],
-            result["wind_ms"],
-            result["temperature"],
-            result["stars"],
-        )
-
-    except Exception as e:
-
-        logger.exception(
-            "Database save error: %s",
-            e,
-        )
-
-        forecast_id = 0
+    forecast_id = save_forecast_to_db(
+        callback.from_user.id,
+        region,
+        fish,
+        result["forecast_day"],
+        result["hour"],
+        result["pressure_mm"],
+        result["wind_ms"],
+        result["temperature"],
+        result["stars"],
+    )
 
     # --------------------------------------------------------
-    # RESPONSE
+    # Ответ
     # --------------------------------------------------------
 
     response = (
@@ -2343,8 +1949,7 @@ async def handle_hour(
         f"{result['forecast_day']} "
         f"о {result['hour']:02d}:00\n\n"
 
-        f"🎣 <b>{fish_type}</b>\n"
-        f"Джерело: {result['sources_used']}\n\n"
+        f"🎣 <b>{fish}</b>\n\n"
 
         f"🌕 {result['moon_phase']}\n"
 
@@ -2354,6 +1959,7 @@ async def handle_hour(
 
         f"🌀 Тиск: "
         f"{result['pressure_mm']} мм\n"
+
         f"   {result['pressure_trend']}\n"
         f"   {result['pressure_stability']}\n"
 
@@ -2373,41 +1979,32 @@ async def handle_hour(
 
         f"{result['stars_graphic']}\n\n"
 
-        f"<i>Розрахунковий бал: "
+        f"<i>Внутрішній бал: "
         f"{result['score_100']}/100</i>\n\n"
 
         f"💡 <b>Експертний аналіз:</b>\n"
         f"{result['expert_commentary']}"
     )
 
-    # --------------------------------------------------------
-    # BUTTONS
-    # --------------------------------------------------------
-
-    kb_rows = [
-        [
-            InlineKeyboardButton(
-                text="📢 Поділитися в чаті",
-                callback_data=(
-                    f"share_"
-                    f"{result['stars']}_"
-                    f"{fish_type}_"
-                    f"{region}"
-                ),
-            )
-        ],
-
-        [
-            InlineKeyboardButton(
-                text="💬 Перейти в чат",
-                url=GROUP_URL,
-            )
-        ],
-    ]
-
-    if forecast_id:
-
-        kb_rows.append(
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📢 Поділитися в чаті",
+                    callback_data=(
+                        f"share_"
+                        f"{result['stars']}_"
+                        f"{fish}_"
+                        f"{region}"
+                    ),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="💬 Перейти в чат",
+                    url=GROUP_URL,
+                )
+            ],
             [
                 InlineKeyboardButton(
                     text="👍 Точний",
@@ -2415,23 +2012,19 @@ async def handle_hour(
                         f"fb_good_{forecast_id}"
                     ),
                 ),
-
                 InlineKeyboardButton(
                     text="👎 Хибний",
                     callback_data=(
                         f"fb_bad_{forecast_id}"
                     ),
                 ),
-            ]
-        )
-
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=kb_rows
+            ],
+        ]
     )
 
     await callback.message.answer(
         response,
-        reply_markup=kb,
+        reply_markup=keyboard,
         parse_mode="HTML",
     )
 
@@ -2451,53 +2044,59 @@ async def handle_feedback(
     callback: CallbackQuery,
 ):
 
+    parts = callback.data.split("_")
+
+    if len(parts) != 3:
+
+        await callback.answer(
+            "Помилка",
+            show_alert=True,
+        )
+
+        return
+
+    rating = parts[1]
+
     try:
-
-        parts = callback.data.split("_")
-
-        rating = parts[1]
 
         forecast_id = int(
             parts[2]
         )
 
-        save_feedback_to_db(
-            callback.from_user.id,
-            forecast_id,
-            rating,
-        )
-
-        if rating == "good":
-
-            msg = (
-                "Дякуємо! "
-                "Відгук допоможе покращити "
-                "прогнози 👍"
-            )
-
-        else:
-
-            msg = (
-                "Дякуємо за зворотний "
-                "зв’язок 👎"
-            )
+    except ValueError:
 
         await callback.answer(
-            msg,
+            "Помилка",
             show_alert=True,
         )
 
-    except Exception as e:
+        return
 
-        logger.exception(
-            "Feedback error: %s",
-            e,
+    save_feedback_to_db(
+        callback.from_user.id,
+        forecast_id,
+        rating,
+    )
+
+    if rating == "good":
+
+        text = (
+            "Дякуємо! "
+            "Відгук допоможе покращити "
+            "прогнози 👍"
         )
 
-        await callback.answer(
-            "❌ Помилка.",
-            show_alert=True,
+    else:
+
+        text = (
+            "Дякуємо за зворотний "
+            "зв’язок 👎"
         )
+
+    await callback.answer(
+        text,
+        show_alert=True,
+    )
 
 
 # ============================================================
@@ -2527,23 +2126,17 @@ async def handle_share(
             + "☆" * (5 - stars_int)
         )
 
-        first_name = (
-            callback.from_user.first_name
-            or "Рибалка"
-        )
-
         text = (
-            f"📢 <b>{first_name} "
-            f"поділився прогнозом!</b>\n\n"
+            f"📢 <b>"
+            f"{callback.from_user.first_name}"
+            f" поділився прогнозом!</b>\n\n"
 
             f"📍 {region}\n"
             f"🎣 <b>{fish}</b>\n"
-
-            f"⭐ {stars_int}/5 "
+            f"⭐ {stars}/5 "
             f"({graphic})\n\n"
 
-            f"🎣 Приєднуйтесь до "
-            f"рибальського клубу!"
+            f"🎣 Fishing Forecast"
         )
 
         await bot.send_message(
@@ -2559,14 +2152,14 @@ async def handle_share(
 
     except Exception as e:
 
-        logger.exception(
+        logger.error(
             "Share error: %s",
             e,
         )
 
         await callback.answer(
             "❌ Не вдалося відправити "
-            "повідомлення в чат.",
+            "в чат.",
             show_alert=True,
         )
 
@@ -2581,26 +2174,13 @@ async def fallback(
     state: FSMContext,
 ):
 
-    try:
+    current_state = await state.get_state()
 
-        current_state = (
-            await state.get_state()
-        )
+    if current_state is None:
 
-        if current_state is None:
-
-            await message.answer(
-                "Натисніть /start 👇",
-                reply_markup=(
-                    get_regions_keyboard()
-                ),
-            )
-
-    except Exception as e:
-
-        logger.exception(
-            "Fallback error: %s",
-            e,
+        await message.answer(
+            "Натисніть /start",
+            reply_markup=get_regions_keyboard(),
         )
 
 
@@ -2613,11 +2193,11 @@ async def health(
 ):
 
     return web.Response(
-        text="Fishing bot is running ✅"
+        text="Fishing Forecast Bot is running ✅"
     )
 
 
-async def health_head(
+async def healthz(
     request: web.Request,
 ):
 
@@ -2625,10 +2205,6 @@ async def health_head(
         text="OK"
     )
 
-
-# ============================================================
-# WEB SERVER
-# ============================================================
 
 async def start_health_server():
 
@@ -2639,14 +2215,9 @@ async def start_health_server():
         health,
     )
 
-    app.router.add_head(
-        "/",
-        health_head,
-    )
-
     app.router.add_get(
         "/health",
-        health,
+        healthz,
     )
 
     runner = web.AppRunner(
@@ -2655,92 +2226,20 @@ async def start_health_server():
 
     await runner.setup()
 
-    port = int(
-        os.environ.get(
-            "PORT",
-            "10000",
-        )
-    )
-
     site = web.TCPSite(
         runner,
         "0.0.0.0",
-        port,
+        PORT,
     )
 
     await site.start()
 
     logger.info(
         "Health server started on port %s",
-        port,
+        PORT,
     )
 
     return runner
-
-
-# ============================================================
-# BOT POLLING
-# ============================================================
-
-async def start_bot():
-
-    logger.info(
-        "Starting Telegram bot..."
-    )
-
-    # Проверяем токен до polling
-    try:
-
-        me = await bot.get_me()
-
-        logger.info(
-            "Telegram bot connected: @%s id=%s",
-            me.username,
-            me.id,
-        )
-
-    except Exception as e:
-
-        logger.exception(
-            "Telegram token/API error: %s",
-            e,
-        )
-
-        raise
-
-    while True:
-
-        try:
-
-            logger.info(
-                "Starting polling..."
-            )
-
-            await dp.start_polling(
-                bot,
-                allowed_updates=dp.resolve_used_update_types(),
-            )
-
-        except asyncio.CancelledError:
-
-            logger.info(
-                "Polling cancelled"
-            )
-
-            raise
-
-        except Exception as e:
-
-            logger.exception(
-                "Polling crashed: %s",
-                e,
-            )
-
-            logger.info(
-                "Restart polling in 10 seconds..."
-            )
-
-            await asyncio.sleep(10)
 
 
 # ============================================================
@@ -2750,43 +2249,51 @@ async def start_bot():
 async def main():
 
     logger.info(
-        "===================================="
+        "======================================"
     )
 
     logger.info(
-        "🎣 FISHING FORECAST BOT"
+        "Fishing Forecast Bot starting..."
     )
 
     logger.info(
-        "Starting..."
+        "Python PID: %s",
+        os.getpid(),
     )
 
     logger.info(
-        "===================================="
+        "PORT: %s",
+        PORT,
     )
 
-    # DB
+    logger.info(
+        "======================================"
+    )
+
     init_db()
 
-    # Health
-    health_runner = (
-        await start_health_server()
-    )
+    health_runner = await start_health_server()
 
     try:
 
-        # Telegram
-        await start_bot()
+        logger.info(
+            "Starting Telegram polling..."
+        )
+
+        await dp.start_polling(
+            bot,
+            allowed_updates=dp.resolve_used_update_types(),
+        )
 
     finally:
 
         logger.info(
-            "Stopping health server..."
+            "Stopping bot..."
         )
 
-        await health_runner.cleanup()
-
         await bot.session.close()
+
+        await health_runner.cleanup()
 
 
 # ============================================================
@@ -2807,9 +2314,10 @@ if __name__ == "__main__":
             "Bot stopped by user"
         )
 
-    except Exception as e:
+    except Exception:
 
         logger.exception(
-            "FATAL ERROR: %s",
-            e,
+            "FATAL ERROR"
         )
+
+        raise
