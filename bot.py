@@ -2744,25 +2744,82 @@ finally:
 # ============================================================
 # ENTRY POINT
 # ============================================================
+async def main():
+
+    # --------------------------------------------------------
+    # ВАЖНО:
+    # Удаляем webhook перед polling
+    # --------------------------------------------------------
+
+    try:
+
+        await bot.delete_webhook(
+            drop_pending_updates=False
+        )
+
+        logger.info(
+            "Telegram webhook cleared"
+        )
+
+    except Exception as e:
+
+        logger.warning(
+            f"Не удалось удалить webhook: {e}"
+        )
+
+    # --------------------------------------------------------
+    # POLLING
+    # --------------------------------------------------------
+
+    try:
+
+        logger.info(
+            "Starting polling..."
+        )
+
+        await dp.start_polling(
+            bot,
+            polling_timeout=30,
+            handle_as_tasks=True,
+        )
+
+    except Exception as e:
+
+        logger.exception(
+            f"Polling crashed: {e}"
+        )
+
+        raise
+
+    finally:
+
+        try:
+            await health_runner.cleanup()
+        except Exception as e:
+            logger.warning(
+                f"Health server cleanup error: {e}"
+            )
+
+        try:
+            await bot.session.close()
+        except Exception as e:
+            logger.warning(
+                f"Bot session close error: {e}"
+            )
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
 
 if __name__ == "__main__":
 
     try:
 
-        asyncio.run(
-            main()
-        )
+        asyncio.run(main())
 
     except KeyboardInterrupt:
 
         logger.info(
             "Bot stopped manually"
         )
-
-    except Exception as e:
-
-        logger.exception(
-            f"FATAL ERROR: {e}"
-        )
-
-        raise
