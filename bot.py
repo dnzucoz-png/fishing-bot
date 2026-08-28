@@ -21,7 +21,9 @@ import aiohttp
 from aiohttp import web
 
 # ====================== НАСТРОЙКИ ======================
-API_TOKEN = "8373587458:AAHTYu4K3O7Vjo9aAav_W8rsieXevgJvns0"
+API_TOKEN = os.getenv("BOT_TOKEN")
+if not API_TOKEN:
+    raise ValueError("BOT_TOKEN не встановлено!")
 GROUP_CHAT_ID = -1004434293069
 GROUP_URL = "https://t.me/+rKxYkNg85aAwNzFi"
 
