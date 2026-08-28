@@ -2709,33 +2709,43 @@ async def main():
     # не падаем навсегда.
     # --------------------------------------------------------
 
+   # ============================================================
+# POLLING
+# ============================================================
+
+try:
+
+    logger.info("Starting Telegram polling...")
+
+    await dp.start_polling(
+        bot,
+        polling_timeout=30,
+        handle_as_tasks=True,
+    )
+
+except Exception as e:
+
+    logger.exception(
+        f"Polling остановлен: {e}"
+    )
+
+    raise
+
+finally:
+
     try:
-
-        logger.info(
-            "Starting Telegram polling..."
-        )
-
-        await dp.start_polling(
-            bot,
-            polling_timeout=30,
-            handle_as_tasks=True,
-            backoff_config=None,
-        )
-
-    except Exception as e:
-
-        logger.exception(
-            f"Polling остановлен: {e}"
-        )
-
-        raise
-
-    finally:
-
         await health_runner.cleanup()
+    except Exception as e:
+        logger.warning(
+            f"Ошибка остановки health server: {e}"
+        )
 
+    try:
         await bot.session.close()
-
+    except Exception as e:
+        logger.warning(
+            f"Ошибка закрытия Telegram session: {e}"
+        )
 
 # ============================================================
 # ENTRY POINT
