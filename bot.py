@@ -42,8 +42,14 @@ PREDATOR_FISH = ["Щука", "Окунь", "Сом"]
 # ====================== КЭШ И RATE-LIMIT ======================
 weather_cache = OrderedDict()
 CACHE_MAX_ENTRIES = 20
-CACHE_TTL = 12 * 60 * 60          # 12 годин (було 2 години)
+CACHE_TTL = 12 * 60 * 60          # 12 годин
 RATE_LIMIT_UNTIL = 0
+
+# Семафор для сериализации запросов к Open-Meteo
+weather_semaphore = asyncio.Semaphore(1)
+# Время последнего запроса для минимального интервала
+last_weather_request_time = 0
+MIN_REQUEST_INTERVAL = 2.0  # секунды
 
 # Кэш геокодирования
 geocode_cache = OrderedDict()
@@ -273,49 +279,56 @@ class MultiSourceWeatherClient:
     def __init__(self, lat: float, lon: float):
         self.lat = lat
         self.lon = lon
-        # Округлення координат до 2 знаків (~1 км) для спільного кешування
         self.cache_key = f"{round(lat, 2)}_{round(lon, 2)}"
 
     async def fetch_open_meteo(self, session, model: Optional[str] = None):
-        global RATE_LIMIT_UNTIL
-        now = datetime.now().timestamp()
-        if now < RATE_LIMIT_UNTIL:
-            logging.warning("Rate-limit cooldown активний — запит пропущено")
-            return None
+        global RATE_LIMIT_UNTIL, last_weather_request_time
 
-        model_param = f"&models={model}" if model else ""
-        url = (
-            f"https://api.open-meteo.com/v1/forecast?latitude={self.lat}&longitude={self.lon}"
-            f"&hourly=temperature_2m,apparent_temperature,relative_humidity_2m,surface_pressure,"
-            f"wind_speed_10m,wind_direction_10m,cloud_cover,precipitation,sea_surface_temperature"
-            f"{model_param}&timezone=auto&past_days=2&forecast_days=3"
-        )
+        async with weather_semaphore:
+            now = datetime.now().timestamp()
+            if now < RATE_LIMIT_UNTIL:
+                logging.warning("Rate-limit cooldown активний — запит пропущено")
+                return None
 
-        for attempt in range(2):
-            try:
-                timeout = aiohttp.ClientTimeout(total=30, connect=10)
-                async with session.get(url, timeout=timeout) as resp:
-                    if resp.status == 200:
-                        return await resp.json()
+            # Витримуємо мінімальний інтервал між запитами
+            time_since_last = now - last_weather_request_time
+            if time_since_last < MIN_REQUEST_INTERVAL:
+                await asyncio.sleep(MIN_REQUEST_INTERVAL - time_since_last)
 
-                    if resp.status == 429:
-                        cooldown = 10 * 60 + attempt * 120
-                        RATE_LIMIT_UNTIL = datetime.now().timestamp() + cooldown
-                        logging.error(f"Open-Meteo 429 → cooldown {cooldown // 60} хв (model={model})")
-                        await asyncio.sleep(5)  # пауза після 429
-                        return None
+            model_param = f"&models={model}" if model else ""
+            url = (
+                f"https://api.open-meteo.com/v1/forecast?latitude={self.lat}&longitude={self.lon}"
+                f"&hourly=temperature_2m,apparent_temperature,relative_humidity_2m,surface_pressure,"
+                f"wind_speed_10m,wind_direction_10m,cloud_cover,precipitation,sea_surface_temperature"
+                f"{model_param}&timezone=auto&past_days=2&forecast_days=3"
+            )
 
-                    logging.error(f"Open-Meteo статус {resp.status} (model={model})")
+            for attempt in range(2):
+                try:
+                    timeout = aiohttp.ClientTimeout(total=30, connect=10)
+                    last_weather_request_time = datetime.now().timestamp()
+                    async with session.get(url, timeout=timeout) as resp:
+                        if resp.status == 200:
+                            return await resp.json()
+
+                        if resp.status == 429:
+                            cooldown = 15 * 60  # 15 хвилин
+                            RATE_LIMIT_UNTIL = datetime.now().timestamp() + cooldown
+                            logging.error(f"Open-Meteo 429 → cooldown {cooldown // 60} хв")
+                            await asyncio.sleep(5)
+                            return None
+
+                        logging.error(f"Open-Meteo статус {resp.status} (model={model})")
+                        await asyncio.sleep(2)
+
+                except asyncio.TimeoutError:
+                    logging.warning(f"Timeout Open-Meteo (model={model})")
+                    await asyncio.sleep(1)
+                except Exception as e:
+                    logging.warning(f"Помилка Open-Meteo (model={model}): {e}")
                     await asyncio.sleep(2)
 
-            except asyncio.TimeoutError:
-                logging.warning(f"Timeout Open-Meteo (model={model})")
-                await asyncio.sleep(1)
-            except Exception as e:
-                logging.warning(f"Помилка Open-Meteo (model={model}): {e}")
-                await asyncio.sleep(2)
-
-        return None
+            return None
 
     async def get_averaged_weather(self):
         global RATE_LIMIT_UNTIL
@@ -335,7 +348,6 @@ class MultiSourceWeatherClient:
             return None
 
         async with aiohttp.ClientSession() as session:
-            # Лише GFS, без ECMWF
             res = await self.fetch_open_meteo(session)
 
             if not res:
@@ -871,7 +883,7 @@ async def handle_hour(callback: CallbackQuery, state: FSMContext):
         error_text = (
             "❌ Open-Meteo тимчасово обмежив запити (rate limit).\n\n"
             "Це нормально на безкоштовному API.\n"
-            "Спробуйте через <b>8–12 хвилин</b>.\n"
+            "Спробуйте через <b>15 хвилин</b>.\n"
             "Дані кешуються на 12 годин."
         )
         await callback.message.edit_text(error_text, parse_mode="HTML")
