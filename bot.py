@@ -23,9 +23,10 @@ from aiohttp import web
 # ====================== НАСТРОЙКИ ======================
 API_TOKEN = os.getenv("BOT_TOKEN")
 if not API_TOKEN:
-    raise ValueError("BOT_TOKEN не встановлено!")
-GROUP_CHAT_ID = -1004434293069
-GROUP_URL = "https://t.me/+rKxYkNg85aAwNzFi"
+    raise ValueError("BOT_TOKEN не встановлено! Додайте змінну оточення BOT_TOKEN.")
+
+GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID", "-1004434293069"))
+GROUP_URL = os.getenv("GROUP_URL", "https://t.me/+rKxYkNg85aAwNzFi")
 
 REGIONS = {
     "Дніпропетровська": {"lat": 48.4647, "lon": 35.0462},
@@ -41,12 +42,12 @@ PREDATOR_FISH = ["Щука", "Окунь", "Сом"]
 # ====================== КЭШ И RATE-LIMIT ======================
 weather_cache = OrderedDict()
 CACHE_MAX_ENTRIES = 20
-CACHE_TTL = 2 * 60 * 60          # 2 часа
+CACHE_TTL = 12 * 60 * 60          # 12 годин (було 2 години)
 RATE_LIMIT_UNTIL = 0
 
 # Кэш геокодирования
 geocode_cache = OrderedDict()
-GEOCODE_CACHE_TTL = 30 * 24 * 60 * 60  # 30 дней
+GEOCODE_CACHE_TTL = 30 * 24 * 60 * 60  # 30 днів
 
 class ForecastStates(StatesGroup):
     choosing_region = State()
@@ -138,7 +139,7 @@ async def get_user_history_from_db(user_id, limit=5):
 
 # ====================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ======================
 def haversine(lat1, lon1, lat2, lon2):
-    R = 6371  # радиус Земли в км
+    R = 6371
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
     a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
@@ -180,7 +181,6 @@ def check_sun_activity(hour: int) -> Tuple[str, str, int]:
         return "☀️ День", "Стандартна активність.", 0
 
 def get_season_advice(month: int, fish_type: str) -> str:
-    """Сезонные рекомендации по рыбе."""
     if fish_type == "Лящ":
         if month in [5, 6]:
             return "🐟 Лящ активно годується після нересту. Шукайте його на глибинах 3-5 м."
@@ -230,7 +230,6 @@ def get_season_advice(month: int, fish_type: str) -> str:
 
 # ====================== ОБРАТНОЕ ГЕОКОДИРОВАНИЕ ======================
 async def get_location_name(lat: float, lon: float) -> str:
-    """Возвращает название населённого пункта по координатам."""
     cache_key = f"{lat:.5f},{lon:.5f}"
     now = datetime.now().timestamp()
     if cache_key in geocode_cache:
@@ -238,20 +237,18 @@ async def get_location_name(lat: float, lon: float) -> str:
         if now - ts < GEOCODE_CACHE_TTL:
             return name
 
-    # Обновлено: zoom=14 для более точного определения города/посёлка
     url = (
         "https://nominatim.openstreetmap.org/reverse"
         f"?lat={lat}&lon={lon}&format=json&zoom=14"
         "&addressdetails=1&accept-language=uk"
     )
-    headers = {"User-Agent": "FishingForecastBot/1.0 (@Fishing202_bot"}  # Замените на свой email
+    headers = {"User-Agent": "FishingForecastBot/1.0 (contact@example.com)"}  # Змініть на свій email
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers, timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     address = data.get("address", {})
-                    # Проверяем больше полей для точного названия
                     name = (
                         address.get("city") or
                         address.get("town") or
@@ -276,11 +273,11 @@ class MultiSourceWeatherClient:
     def __init__(self, lat: float, lon: float):
         self.lat = lat
         self.lon = lon
-        self.cache_key = f"{lat}_{lon}"
+        # Округлення координат до 2 знаків (~1 км) для спільного кешування
+        self.cache_key = f"{round(lat, 2)}_{round(lon, 2)}"
 
     async def fetch_open_meteo(self, session, model: Optional[str] = None):
         global RATE_LIMIT_UNTIL
-
         now = datetime.now().timestamp()
         if now < RATE_LIMIT_UNTIL:
             logging.warning("Rate-limit cooldown активний — запит пропущено")
@@ -305,6 +302,7 @@ class MultiSourceWeatherClient:
                         cooldown = 10 * 60 + attempt * 120
                         RATE_LIMIT_UNTIL = datetime.now().timestamp() + cooldown
                         logging.error(f"Open-Meteo 429 → cooldown {cooldown // 60} хв (model={model})")
+                        await asyncio.sleep(5)  # пауза після 429
                         return None
 
                     logging.error(f"Open-Meteo статус {resp.status} (model={model})")
@@ -337,11 +335,8 @@ class MultiSourceWeatherClient:
             return None
 
         async with aiohttp.ClientSession() as session:
+            # Лише GFS, без ECMWF
             res = await self.fetch_open_meteo(session)
-
-            if not res and datetime.now().timestamp() >= RATE_LIMIT_UNTIL:
-                logging.warning("GFS не відповів, пробую ECMWF...")
-                res = await self.fetch_open_meteo(session, "ecmwf_ifs04")
 
             if not res:
                 if self.cache_key in weather_cache:
@@ -481,7 +476,6 @@ class MultiSourceWeatherClient:
         wind_ms, wind_dir, precip, sun_title, sun_desc,
         temp, water_temp, score, humidity, cloud_cover, moon_text
     ):
-        # Определяем сезон
         current_month = datetime.now().month
         season_advice = get_season_advice(current_month, fish_type)
 
@@ -496,7 +490,6 @@ class MultiSourceWeatherClient:
             f"🌡 <b>Температура:</b> повітря {temp}°C, вода ~{water_temp}°C",
         ]
 
-        # Рекомендации по температуре
         if water_temp > 25:
             comments.append("   🔥 Спека — шукайте тінь, глибину, течію. Риба пасивна вдень.")
         elif water_temp < 9:
@@ -509,7 +502,6 @@ class MultiSourceWeatherClient:
         comments.append(f"   Тренд: {trend_text}")
         comments.append(f"   Стабільність: {stability_text}")
 
-        # Дополнительные советы по давлению
         if "падає" in trend_text:
             comments.append("   💡 При падінні тиску хижак активізується, мирна риба відходить на глибину.")
         elif "росте" in trend_text:
@@ -518,7 +510,6 @@ class MultiSourceWeatherClient:
         comments.append("")
         comments.append(f"💨 <b>Вітер:</b> {wind_ms} м/с, {wind_dir}")
 
-        # Рекомендации по ветру
         if wind_ms < 2:
             comments.append("   🔇 Штиль — обережна риба, використовуйте тонкі снасті.")
         elif 2 <= wind_ms <= 5.5:
@@ -537,7 +528,6 @@ class MultiSourceWeatherClient:
         elif cloud_cover > 65:
             comments.append("   🎣 Хмарно — гарний час для хижої риби.")
 
-        # Советы по конкретной рыбе
         comments.append("")
         comments.append(f"🎯 <b>Рекомендації по {fish_type}:</b>")
         if fish_type in PREDATOR_FISH:
@@ -561,7 +551,6 @@ class MultiSourceWeatherClient:
             elif fish_type == "Плотва":
                 comments.append("   • Легка махова вудка, тонка оснастка, дрібний гачок.")
 
-        # Итоговая оценка
         comments.append("")
         if score >= 78:
             comments.append("🏆 <b>ВИСНОВОК:</b> Відмінні умови! Вирушайте на водойму негайно.")
@@ -725,7 +714,7 @@ async def cmd_help(message: Message):
         "• Вітер, опади, хмарність\n"
         "• Фаза місяця та час доби\n"
         "• Сезонні особливості поведінки риби\n\n"
-        "<b>Джерела даних:</b> Open-Meteo (GFS), кеш 2 години."
+        "<b>Джерела даних:</b> Open-Meteo (GFS), кеш 12 годин."
     )
     await message.answer(text, parse_mode="HTML")
 
@@ -744,13 +733,11 @@ async def show_history(message: Message):
         text += f"📍 {region} | 🎣 {fish}\n{day} о {hour_str}\nОцінка: {graphic}\n🕒 {ts}\n\n"
     await message.answer(text, parse_mode="HTML")
 
-# Обработчик геолокации (использует точные координаты)
 @dp.message(F.location)
 async def handle_location(message: Message, state: FSMContext):
     loc = message.location
     lat, lon = loc.latitude, loc.longitude
 
-    # Получаем название ближайшего населённого пункта
     location_name = await get_location_name(lat, lon)
 
     await state.update_data(lat=lat, lon=lon, location_name=location_name)
@@ -858,7 +845,6 @@ async def handle_hour(callback: CallbackQuery, state: FSMContext):
     fish_type = data.get("fish", "Лящ")
     day_offset = data.get("day_offset", 0)
 
-    # Определяем координаты и название места
     if "lat" in data and "lon" in data:
         lat, lon = data["lat"], data["lon"]
         region_display = data.get("location_name", "Ваша геолокація")
@@ -886,7 +872,7 @@ async def handle_hour(callback: CallbackQuery, state: FSMContext):
             "❌ Open-Meteo тимчасово обмежив запити (rate limit).\n\n"
             "Це нормально на безкоштовному API.\n"
             "Спробуйте через <b>8–12 хвилин</b>.\n"
-            "Дані кешуються на 2 години."
+            "Дані кешуються на 12 годин."
         )
         await callback.message.edit_text(error_text, parse_mode="HTML")
         await state.clear()
@@ -996,6 +982,7 @@ async def main():
             break
 
     logging.info("Shutting down...")
+    await dp.stop_polling()
     await bot.session.close()
     await runner.cleanup()
 
