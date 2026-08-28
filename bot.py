@@ -19,9 +19,8 @@ from aiohttp import web
 
 # ====================== НАЛАШТУВАННЯ ======================
 # Спочатку беремо з Environment Variables (рекомендовано), інакше — захардкоджений
-API_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("API_TOKEN") or "8373587458:AAEVFuI-yRfE4vTeKT86idwi-0ytbl122T4"
-
-if not API_TOKEN or API_TOKEN.strip() == "":
+API_TOKEN = os.getenv("BOT_TOKEN")
+if not API_TOKEN:
     raise ValueError("BOT_TOKEN не встановлено!")
 
 GROUP_CHAT_ID = -1004434293069
