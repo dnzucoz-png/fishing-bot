@@ -18,9 +18,12 @@ import aiohttp
 from aiohttp import web
 
 # ====================== НАЛАШТУВАННЯ ======================
-API_TOKEN = os.getenv("BOT_TOKEN")
-if not API_TOKEN:
-    raise ValueError("BOT_TOKEN не встановлено!"
+# Спочатку беремо з Environment Variables (рекомендовано), інакше — захардкоджений
+API_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("API_TOKEN") or "8373587458:AAEVFuI-yRfE4vTeKT86idwi-0ytbl122T4"
+
+if not API_TOKEN or API_TOKEN.strip() == "":
+    raise ValueError("BOT_TOKEN не встановлено!")
+
 GROUP_CHAT_ID = -1004434293069
 GROUP_URL = "https://t.me/+rKxYkNg85aAwNzFi"
 
@@ -188,7 +191,7 @@ class MultiSourceWeatherClient:
                         return await resp.json()
 
                     if resp.status == 429:
-                        cooldown = 10 * 60 + attempt * 120   # 10–12 хвилин
+                        cooldown = 10 * 60 + attempt * 120
                         RATE_LIMIT_UNTIL = datetime.now().timestamp() + cooldown
                         logging.error(f"Open-Meteo 429 → cooldown {cooldown // 60} хв (model={model})")
                         return None
@@ -206,14 +209,12 @@ class MultiSourceWeatherClient:
         global RATE_LIMIT_UNTIL
         now = datetime.now().timestamp()
 
-        # 1. Свіжий кеш
         if self.cache_key in weather_cache:
             data, ts = weather_cache[self.cache_key]
             if now - ts < CACHE_TTL:
                 logging.info("Використовую свіжий кеш погоди")
                 return data
 
-        # 2. Якщо діє cooldown — віддаємо навіть старий кеш
         if now < RATE_LIMIT_UNTIL:
             if self.cache_key in weather_cache:
                 logging.info("Cooldown активний → віддаю застарілий кеш")
@@ -222,16 +223,13 @@ class MultiSourceWeatherClient:
             return None
 
         async with aiohttp.ClientSession() as session:
-            # Тільки GFS (менше навантаження)
             res = await self.fetch_open_meteo(session)
 
-            # Якщо GFS не вдався і cooldown ще не поставлений — пробуємо ECMWF один раз
             if not res and datetime.now().timestamp() >= RATE_LIMIT_UNTIL:
                 logging.warning("GFS не відповів, пробую ECMWF...")
                 res = await self.fetch_open_meteo(session, "ecmwf_ifs04")
 
             if not res:
-                # Останній шанс — віддати старий кеш
                 if self.cache_key in weather_cache:
                     logging.info("API недоступне → віддаю застарілий кеш")
                     return weather_cache[self.cache_key][0]
@@ -764,7 +762,6 @@ async def main():
     init_db()
     logging.basicConfig(level=logging.INFO)
 
-    # Dummy HTTP-сервер для Render
     app = web.Application()
     app.router.add_get("/", health)
     runner = web.AppRunner(app)
