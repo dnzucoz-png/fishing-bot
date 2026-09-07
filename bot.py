@@ -1338,23 +1338,19 @@ async def back_region(message: Message, state: FSMContext):
 
 # ---------------- LOCATION ----------------
 
-@dp.message(F.text == "📍 Моє місце")
-async def location_request(message: Message):
-    kb = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📍 Надіслати геолокацію", request_location=True)]],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
-    await message.answer(
-        "Надішліть геолокацію — визначу найближчу область.",
-        reply_markup=kb,
-    )
-
-
 @dp.message(F.location)
 async def location_handler(message: Message, state: FSMContext):
     loc: Location = message.location
+    # Логируем полученные координаты
+    logging.info(f"📍 Получена геолокация: lat={loc.latitude}, lon={loc.longitude}")
+    
     region = nearest_region(loc.latitude, loc.longitude)
+    logging.info(f"📍 Определена область: {region}")
+    
+    if not region:
+        await message.answer("Не удалось определить область. Выберите вручную.")
+        return
+    
     await state.clear()
     await state.update_data(region=region)
     await state.set_state(ForecastStates.water_body)
