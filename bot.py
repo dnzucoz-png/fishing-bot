@@ -546,7 +546,6 @@ class WeatherClient:
             "past_days": 2,
             "forecast_days": 4,
             "timezone": "auto",
-            "wind_speed_unit": "ms",  # ВАЖНО: по умолчанию API отдаёт км/ч
         }
 
         url = "https://api.open-meteo.com/v1/forecast"
@@ -674,7 +673,6 @@ class WeatherClient:
 
     @staticmethod
     def wind_score(wind, direction, predator):
-        # wind уже в м/с благодаря wind_speed_unit=ms
         if wind < 1.5:
             score = -4 if predator else 2
         elif 2 <= wind <= 5.5:
@@ -928,38 +926,17 @@ class WeatherClient:
 # IMAGE
 # ============================================================
 
-def _load_fonts():
-    """Пытаемся загрузить нормальные шрифты, работающие и на Linux."""
-    candidates = [
-        # Windows
-        ("arial.ttf", "arialbd.ttf"),
-        # Linux common
-        ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
-        ("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"),
-        ("/usr/share/fonts/truetype/freefont/FreeSans.ttf",
-         "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf"),
-    ]
-    for regular, bold in candidates:
-        try:
-            font = ImageFont.truetype(regular, 24)
-            bold_f = ImageFont.truetype(bold, 30)
-            small = ImageFont.truetype(regular, 18)
-            return font, bold_f, small
-        except Exception:
-            continue
-    # fallback
-    default = ImageFont.load_default()
-    return default, default, default
-
-
 def make_image(result, region, body_name, fish):
     try:
         img = Image.new("RGB", (1000, 650), (240, 248, 255))
         draw = ImageDraw.Draw(img)
 
-        font, bold, small = _load_fonts()
+        try:
+            font = ImageFont.truetype("arial.ttf", 24)
+            bold = ImageFont.truetype("arialbd.ttf", 30)
+            small = ImageFont.truetype("arial.ttf", 18)
+        except Exception:
+            font = bold = small = ImageFont.load_default()
 
         draw.text((30, 20), "Fishing Forecast", font=bold, fill=(0, 0, 120))
         draw.text(
@@ -1096,14 +1073,6 @@ def language_keyboard():
     ])
 
 
-def fish_keyboard_inline():
-    builder = InlineKeyboardBuilder()
-    for fish in FISH_LIST:
-        builder.button(text=fish, callback_data=f"subfish_{fish}")
-    builder.adjust(2)
-    return builder.as_markup()
-
-
 # ============================================================
 # BOT
 # ============================================================
@@ -1227,16 +1196,9 @@ async def water_selected(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
-    if not region:
-        await callback.answer("Сначала выберите область", show_alert=True)
-        return
-
     try:
         idx = int(callback.data.split("_")[1])
-        bodies = WATER_BODIES.get(region, [])
-        if idx < 0 or idx >= len(bodies):
-            raise IndexError
-        body = bodies[idx]
+        body = WATER_BODIES[region][idx]
     except Exception:
         await callback.answer("Ошибка выбора водоёма", show_alert=True)
         return
@@ -1337,10 +1299,7 @@ async def hour_selected(callback: CallbackQuery, state: FSMContext):
     hour = int(callback.data.split("_")[1])
     await state.update_data(hour=hour)
 
-    await run_forecast(
-        callback.message, state, hour,
-        callback_user_id=callback.from_user.id
-    )
+    await run_forecast(callback.message, state, hour, callback_user_id=callback.from_user.id)
     await callback.answer()
 
 
@@ -1457,18 +1416,8 @@ async def run_forecast(message: Message, state: FSMContext, hour: int, callback_
 
 @dp.callback_query(F.data.startswith("fb_"))
 async def feedback_handler(callback: CallbackQuery):
-    parts = callback.data.split("_")
-    if len(parts) < 3:
-        await callback.answer("Ошибка", show_alert=True)
-        return
-    rating = parts[1]
-    try:
-        fid = int(parts[2])
-    except ValueError:
-        await callback.answer("Ошибка", show_alert=True)
-        return
-
-    save_feedback(callback.from_user.id, fid, rating)
+    _, rating, fid = callback.data.split("_")
+    save_feedback(callback.from_user.id, int(fid), rating)
     await callback.answer(
         "Спасибо за обратную связь 👍" if rating == "good"
         else "Спасибо за обратную связь 👎",
@@ -1539,7 +1488,7 @@ async def subscription_region(message: Message, state: FSMContext):
 @dp.callback_query(F.data.startswith("subwater_"))
 async def subscription_water(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    region = data.get("region")
+    region = data["region"]
 
     if callback.data == "subwater_back":
         await state.set_state(SubscribeStates.region)
@@ -1547,17 +1496,8 @@ async def subscription_water(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
-    if not region:
-        await callback.answer("Сначала выберите область", show_alert=True)
-        return
-
-    try:
-        idx = int(callback.data.split("_")[1])
-        bodies = WATER_BODIES.get(region, [])
-        body = bodies[idx]
-    except Exception:
-        await callback.answer("Ошибка выбора водоёма", show_alert=True)
-        return
+    idx = int(callback.data.split("_")[1])
+    body = WATER_BODIES[region][idx]
 
     await state.update_data(
         water_body=body["name"],
@@ -1571,6 +1511,14 @@ async def subscription_water(callback: CallbackQuery, state: FSMContext):
         reply_markup=fish_keyboard_inline(),
     )
     await callback.answer()
+
+
+def fish_keyboard_inline():
+    builder = InlineKeyboardBuilder()
+    for fish in FISH_LIST:
+        builder.button(text=fish, callback_data=f"subfish_{fish}")
+    builder.adjust(2)
+    return builder.as_markup()
 
 
 @dp.callback_query(F.data.startswith("subfish_"))
@@ -1597,11 +1545,6 @@ async def subscription_hour(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
 
     body = body_by_name(data["region"], data["water_body"])
-    if not body:
-        await callback.answer("Ошибка водоёма", show_alert=True)
-        await state.clear()
-        return
-
     save_subscription(
         callback.from_user.id,
         data["region"],
@@ -1815,8 +1758,13 @@ async def check_extreme_weather():
             if len(pressures) < 12:
                 continue
 
-            a = pressures[-12]
-            b = pressures[-1]
+            # Берем последние 12 значений и проверяем наличие None
+            last_12 = pressures[-12:]
+            if any(p is None for p in last_12):
+                continue
+
+            a = last_12[0]
+            b = last_12[-1]
             if a is None or b is None:
                 continue
 
@@ -1898,7 +1846,6 @@ async def main():
     logging.info("Start polling")
     logging.info("Water-body coordinates are used for weather requests")
     logging.info("Open-Meteo cache TTL: %s seconds", CACHE_TTL)
-    logging.info("Wind speed unit forced to m/s")
 
     try:
         await dp.start_polling(bot)
