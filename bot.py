@@ -51,16 +51,6 @@ REGIONS = {
     "Черкаська": {"lat": 49.4444, "lon": 32.0598},
 }
 
-# ВАЖНО:
-# Прогноз теперь берётся по координатам выбранной ВОДОЁМЫ,
-# а не по центру области.
-#
-# Кам'янське водосховище:
-# 48.81421, 34.09400 — координата из актуальной записи
-# по использованию водных биоресурсов в Днепропетровской области.
-#
-# Для Каховского водохранилища старые координаты 47.5,34.2
-# здесь намеренно НЕ используются как координата Кам'янского.
 WATER_BODIES = {
     "Дніпропетровська": [
         {
@@ -546,7 +536,7 @@ class WeatherClient:
             "past_days": 2,
             "forecast_days": 4,
             "timezone": "auto",
-            "wind_speed_unit": "ms",  # ВАЖНО: по умолчанию API отдаёт км/ч
+            "wind_speed_unit": "ms",
         }
 
         url = "https://api.open-meteo.com/v1/forecast"
@@ -674,7 +664,6 @@ class WeatherClient:
 
     @staticmethod
     def wind_score(wind, direction, predator):
-        # wind уже в м/с благодаря wind_speed_unit=ms
         if wind < 1.5:
             score = -4 if predator else 2
         elif 2 <= wind <= 5.5:
@@ -782,9 +771,6 @@ class WeatherClient:
 
         direction = get_wind_direction(wind_deg)
 
-        # Open-Meteo не даёт надёжную температуру воды для обычного
-        # внутреннего водохранилища через стандартный forecast endpoint.
-        # Поэтому показываем ОЦЕНКУ, а не выдаём её за измерение.
         water_temp = round(max(0, min(30, temp * 0.82 + 3.2)), 1)
 
         predator = fish in PREDATORS
@@ -929,11 +915,8 @@ class WeatherClient:
 # ============================================================
 
 def _load_fonts():
-    """Пытаемся загрузить нормальные шрифты, работающие и на Linux."""
     candidates = [
-        # Windows
         ("arial.ttf", "arialbd.ttf"),
-        # Linux common
         ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
          "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
         ("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
@@ -949,7 +932,6 @@ def _load_fonts():
             return font, bold_f, small
         except Exception:
             continue
-    # fallback
     default = ImageFont.load_default()
     return default, default, default
 
@@ -1034,6 +1016,7 @@ def regions_keyboard():
             [KeyboardButton(text="📜 Моя історія"), KeyboardButton(text="ℹ️ Допомога")],
             [KeyboardButton(text="🔔 Підписка"), KeyboardButton(text="🎯 Мої трофеї")],
             [KeyboardButton(text="🌐 Змінити мову")],
+            [KeyboardButton(text="🏠 Головне меню")],
         ],
         resize_keyboard=True,
     )
@@ -1045,6 +1028,7 @@ def fish_keyboard():
             [KeyboardButton(text="Лящ"), KeyboardButton(text="Карась"), KeyboardButton(text="Короп")],
             [KeyboardButton(text="Щука"), KeyboardButton(text="Окунь"), KeyboardButton(text="Сом")],
             [KeyboardButton(text="Плотва"), KeyboardButton(text="◀️ Область")],
+            [KeyboardButton(text="🏠 Головне меню")],
         ],
         resize_keyboard=True,
     )
@@ -1056,7 +1040,8 @@ def water_keyboard(region, prefix="water"):
         builder.button(text=f"🗺 {body['name']}", callback_data=f"{prefix}_{i}")
     builder.adjust(1)
     builder.row(
-        InlineKeyboardButton(text="◀️ Назад", callback_data=f"{prefix}_back")
+        InlineKeyboardButton(text="◀️ Назад", callback_data=f"{prefix}_back"),
+        InlineKeyboardButton(text="🏠 Головне меню", callback_data="main_menu"),
     )
     return builder.as_markup()
 
@@ -1073,8 +1058,10 @@ def day_keyboard():
         )
     builder.adjust(1)
     builder.button(text="▶️ Своя година", callback_data="manual_hour")
-    builder.button(text="◀️ Назад", callback_data="back_to_fish")
-    builder.adjust(1)
+    builder.row(
+        InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_fish"),
+        InlineKeyboardButton(text="🏠 Головне меню", callback_data="main_menu"),
+    )
     return builder.as_markup()
 
 
@@ -1083,7 +1070,10 @@ def hour_keyboard(back="back_to_day"):
     for hour in [5, 6, 7, 8, 9, 10, 12, 14, 16, 18, 19, 20, 21, 22, 23]:
         builder.button(text=f"{hour:02d}:00", callback_data=f"hour_{hour}")
     builder.adjust(3)
-    builder.button(text="◀️ Назад", callback_data=back)
+    builder.row(
+        InlineKeyboardButton(text="◀️ Назад", callback_data=back),
+        InlineKeyboardButton(text="🏠 Головне меню", callback_data="main_menu"),
+    )
     return builder.as_markup()
 
 
@@ -1354,6 +1344,22 @@ async def back_to_day(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+# ---------------- MAIN MENU CALLBACK ----------------
+@dp.callback_query(F.data == "main_menu")
+async def main_menu_callback(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await state.set_state(ForecastStates.region)
+    await callback.message.edit_text(
+        T(callback.from_user.id, "start"),
+        parse_mode="HTML",
+    )
+    await callback.message.answer(
+        "🏠 Вы вернулись в главное меню.",
+        reply_markup=regions_keyboard(),
+    )
+    await callback.answer()
+
+
 async def run_forecast(message: Message, state: FSMContext, hour: int, callback_user_id=None):
     user_id = callback_user_id or message.from_user.id
     data = await state.get_data()
@@ -1436,6 +1442,7 @@ async def run_forecast(message: Message, state: FSMContext, hour: int, callback_
             InlineKeyboardButton(text="👎 Хибный", callback_data=f"fb_bad_{forecast_id}"),
         ],
         [InlineKeyboardButton(text="💬 Чат клуба", url=GROUP_URL)],
+        [InlineKeyboardButton(text="🏠 Головне меню", callback_data="main_menu")],
     ])
 
     image = make_image(result, region, body["name"], fish)
