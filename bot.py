@@ -5,7 +5,7 @@ import sqlite3
 import math
 import io
 from datetime import datetime, timedelta
-from typing import Optional, Tuple, Dict, List
+from typing import Optional, Tuple
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -14,7 +14,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardMarkup, KeyboardButton, Location, FSInputFile
+    ReplyKeyboardMarkup, KeyboardButton, Location
 )
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
 from aiohttp import web
@@ -230,6 +230,11 @@ def set_user_lang(user_id: int, lang: str):
     cursor.execute("INSERT OR REPLACE INTO user_language (user_id, lang) VALUES (?, ?)", (user_id, lang))
     conn.commit()
     conn.close()
+
+def get_lang_dict(user_id: int) -> dict:
+    """Повертає словник з текстами для обраної мови користувача."""
+    lang = get_user_lang(user_id)
+    return LANGUAGES.get(lang, LANGUAGES["uk"])
 
 def save_forecast_to_db(user_id, region, fish_type, forecast_day, hour, pressure, wind, temp, stars):
     conn = sqlite3.connect("fishing_forecast.db")
@@ -761,19 +766,6 @@ async def generate_forecast_image(result, fish_type, region):
         logging.error(f"Помилка генерації зображення: {e}")
         return None
 
-# ====================== MIDDLEWARE ======================
-class LanguageMiddleware(BaseMiddleware):
-    async def __call__(self, handler, event, data):
-        if hasattr(event, 'from_user') and event.from_user:
-            user_id = event.from_user.id
-            lang = get_user_lang(user_id)
-            data["lang"] = lang
-            data["_"] = LANGUAGES.get(lang, LANGUAGES["uk"])
-        else:
-            data["lang"] = "uk"
-            data["_"] = LANGUAGES["uk"]
-        return await handler(event, data)
-
 # ====================== КЛАВІАТУРИ ======================
 def get_regions_keyboard():
     return ReplyKeyboardMarkup(
@@ -817,18 +809,11 @@ def get_language_keyboard():
 bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
-dp.update.middleware(LanguageMiddleware())
 
-# Допоміжна функція для отримання словника мови, якщо _ = None
-def get_lang_dict(user_id, _=None):
-    if _ is not None:
-        return _
-    return LANGUAGES.get(get_user_lang(user_id), LANGUAGES["uk"])
-
+# ------ СТАРТ ------
 @dp.message(Command("start"))
-async def cmd_start(message: Message, state: FSMContext, _: dict = None):
-    if _ is None:
-        _ = get_lang_dict(message.from_user.id)
+async def cmd_start(message: Message, state: FSMContext):
+    _ = get_lang_dict(message.from_user.id)
     await state.clear()
     await state.set_state(ForecastStates.choosing_region)
     await message.answer(
@@ -837,17 +822,17 @@ async def cmd_start(message: Message, state: FSMContext, _: dict = None):
         parse_mode="HTML",
     )
 
+# ------ ДОПОМОГА ------
 @dp.message(Command("help"))
 @dp.message(F.text == "ℹ️ Допомога")
-async def cmd_help(message: Message, _: dict = None):
-    if _ is None:
-        _ = get_lang_dict(message.from_user.id)
+async def cmd_help(message: Message):
+    _ = get_lang_dict(message.from_user.id)
     await message.answer(_["help"], parse_mode="HTML")
 
+# ------ ІСТОРІЯ ------
 @dp.message(F.text == "📜 Моя історія")
-async def show_history(message: Message, _: dict = None):
-    if _ is None:
-        _ = get_lang_dict(message.from_user.id)
+async def show_history(message: Message):
+    _ = get_lang_dict(message.from_user.id)
     rows = get_user_history_from_db(message.from_user.id)
     if not rows:
         await message.answer(_["history_empty"])
@@ -860,16 +845,15 @@ async def show_history(message: Message, _: dict = None):
         text += f"📍 {region} | 🎣 {fish}\n{day} о {hour_str}\n{graphic}\n🕒 {ts}\n\n"
     await message.answer(text, parse_mode="HTML")
 
+# ------ ГОЛОВНЕ МЕНЮ ------
 @dp.message(F.text == "🏠 Головне меню")
-async def main_menu(message: Message, state: FSMContext, _: dict = None):
-    if _ is None:
-        _ = get_lang_dict(message.from_user.id)
-    await cmd_start(message, state, _)
+async def main_menu(message: Message, state: FSMContext):
+    await cmd_start(message, state)  # викликаємо старт, де вже є get_lang_dict
 
+# ------ ГЕОЛОКАЦІЯ ------
 @dp.message(F.text == "📍 Моє місце")
-async def ask_location(message: Message, state: FSMContext, _: dict = None):
-    if _ is None:
-        _ = get_lang_dict(message.from_user.id)
+async def ask_location(message: Message, state: FSMContext):
+    _ = get_lang_dict(message.from_user.id)
     kb = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="📍 Надіслати геолокацію", request_location=True)]],
         resize_keyboard=True,
@@ -881,9 +865,8 @@ async def ask_location(message: Message, state: FSMContext, _: dict = None):
     )
 
 @dp.message(F.location)
-async def handle_location(message: Message, state: FSMContext, _: dict = None):
-    if _ is None:
-        _ = get_lang_dict(message.from_user.id)
+async def handle_location(message: Message, state: FSMContext):
+    _ = get_lang_dict(message.from_user.id)
     location: Location = message.location
     lat, lon = location.latitude, location.longitude
     region = find_nearest_region(lat, lon)
@@ -901,10 +884,10 @@ async def handle_location(message: Message, state: FSMContext, _: dict = None):
         parse_mode="HTML",
     )
 
+# ------ ВИБІР ОБЛАСТІ ------
 @dp.message(F.text.in_(REGIONS.keys()))
-async def handle_region(message: Message, state: FSMContext, _: dict = None):
-    if _ is None:
-        _ = get_lang_dict(message.from_user.id)
+async def handle_region(message: Message, state: FSMContext):
+    _ = get_lang_dict(message.from_user.id)
     await state.update_data(region=message.text)
     await state.set_state(ForecastStates.choosing_fish)
     await message.answer(
@@ -914,15 +897,13 @@ async def handle_region(message: Message, state: FSMContext, _: dict = None):
     )
 
 @dp.message(F.text == "◀️ Змінити область")
-async def change_region(message: Message, state: FSMContext, _: dict = None):
-    if _ is None:
-        _ = get_lang_dict(message.from_user.id)
-    await cmd_start(message, state, _)
+async def change_region(message: Message, state: FSMContext):
+    await cmd_start(message, state)  # викликаємо старт
 
+# ------ ВИБІР РИБИ ------
 @dp.message(F.text.in_(FISH_LIST))
-async def handle_fish(message: Message, state: FSMContext, _: dict = None):
-    if _ is None:
-        _ = get_lang_dict(message.from_user.id)
+async def handle_fish(message: Message, state: FSMContext):
+    _ = get_lang_dict(message.from_user.id)
     data = await state.get_data()
     if "region" not in data:
         await message.answer("Спочатку оберіть область через /start")
@@ -951,17 +932,16 @@ async def handle_fish(message: Message, state: FSMContext, _: dict = None):
     )
 
 @dp.callback_query(F.data == "back_to_fish")
-async def handle_back_to_fish(callback: CallbackQuery, state: FSMContext, _: dict = None):
-    if _ is None:
-        _ = get_lang_dict(callback.from_user.id)
+async def handle_back_to_fish(callback: CallbackQuery, state: FSMContext):
+    _ = get_lang_dict(callback.from_user.id)
     await state.set_state(ForecastStates.choosing_fish)
     await callback.message.edit_text("Оберіть рибу за допомогою кнопок нижче 👇")
     await callback.answer()
 
+# ------ ВИБІР ДНЯ ТА ГОДИНИ ------
 @dp.callback_query(F.data == "manual_hour")
-async def manual_hour_start(callback: CallbackQuery, state: FSMContext, _: dict = None):
-    if _ is None:
-        _ = get_lang_dict(callback.from_user.id)
+async def manual_hour_start(callback: CallbackQuery, state: FSMContext):
+    _ = get_lang_dict(callback.from_user.id)
     await state.set_state(ForecastStates.choosing_hour_manual)
     await callback.message.edit_text(
         _["choose_hour"],
@@ -970,9 +950,8 @@ async def manual_hour_start(callback: CallbackQuery, state: FSMContext, _: dict 
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("day_"))
-async def handle_day(callback: CallbackQuery, state: FSMContext, _: dict = None):
-    if _ is None:
-        _ = get_lang_dict(callback.from_user.id)
+async def handle_day(callback: CallbackQuery, state: FSMContext):
+    _ = get_lang_dict(callback.from_user.id)
     day_offset = int(callback.data.split("_")[1])
     await state.update_data(day_offset=day_offset)
     await state.set_state(ForecastStates.choosing_hour)
@@ -988,9 +967,8 @@ async def handle_day(callback: CallbackQuery, state: FSMContext, _: dict = None)
     await callback.answer()
 
 @dp.callback_query(F.data == "back_to_day")
-async def handle_back_to_day(callback: CallbackQuery, state: FSMContext, _: dict = None):
-    if _ is None:
-        _ = get_lang_dict(callback.from_user.id)
+async def handle_back_to_day(callback: CallbackQuery, state: FSMContext):
+    _ = get_lang_dict(callback.from_user.id)
     await state.set_state(ForecastStates.choosing_day)
     data = await state.get_data()
     fish_type = data.get("fish", "Рибу")
@@ -1016,9 +994,8 @@ async def handle_back_to_day(callback: CallbackQuery, state: FSMContext, _: dict
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("hour_"))
-async def handle_hour(callback: CallbackQuery, state: FSMContext, _: dict = None):
-    if _ is None:
-        _ = get_lang_dict(callback.from_user.id)
+async def handle_hour(callback: CallbackQuery, state: FSMContext):
+    _ = get_lang_dict(callback.from_user.id)
     hour = int(callback.data.split("_")[1])
     data = await state.get_data()
 
@@ -1101,10 +1078,10 @@ async def handle_hour(callback: CallbackQuery, state: FSMContext, _: dict = None
     await state.clear()
     await callback.answer()
 
+# ------ ВІДГУКИ ТА ПОШИРЕННЯ ------
 @dp.callback_query(F.data.startswith("fb_"))
-async def handle_feedback(callback: CallbackQuery, _: dict = None):
-    if _ is None:
-        _ = get_lang_dict(callback.from_user.id)
+async def handle_feedback(callback: CallbackQuery):
+    _ = get_lang_dict(callback.from_user.id)
     parts = callback.data.split("_")
     rating = parts[1]
     forecast_id = int(parts[2])
@@ -1113,9 +1090,8 @@ async def handle_feedback(callback: CallbackQuery, _: dict = None):
     await callback.answer(msg, show_alert=True)
 
 @dp.callback_query(F.data.startswith("share_"))
-async def handle_share(callback: CallbackQuery, _: dict = None):
-    if _ is None:
-        _ = get_lang_dict(callback.from_user.id)
+async def handle_share(callback: CallbackQuery):
+    _ = get_lang_dict(callback.from_user.id)
     try:
         _, stars, fish, region = callback.data.split("_", 3)
         graphic = "⭐" * int(stars) + "☆" * (5 - int(stars))
@@ -1132,26 +1108,23 @@ async def handle_share(callback: CallbackQuery, _: dict = None):
         logging.error(f"Share error: {e}")
         await callback.answer("❌ Помилка відправки", show_alert=True)
 
-# ====================== ПІДПИСКА ======================
+# ------ ПІДПИСКА ------
 @dp.message(F.text == "🔔 Підписка")
-async def subscribe_start(message: Message, state: FSMContext, _: dict = None):
-    if _ is None:
-        _ = get_lang_dict(message.from_user.id)
+async def subscribe_start(message: Message, state: FSMContext):
+    _ = get_lang_dict(message.from_user.id)
     await state.set_state(SubscribeStates.region)
     await message.answer("Оберіть область для підписки:", reply_markup=get_regions_keyboard())
 
 @dp.message(SubscribeStates.region, F.text.in_(REGIONS.keys()))
-async def subscribe_region(message: Message, state: FSMContext, _: dict = None):
-    if _ is None:
-        _ = get_lang_dict(message.from_user.id)
+async def subscribe_region(message: Message, state: FSMContext):
+    _ = get_lang_dict(message.from_user.id)
     await state.update_data(region=message.text)
     await state.set_state(SubscribeStates.fish)
     await message.answer("Оберіть рибу:", reply_markup=get_fish_keyboard())
 
 @dp.message(SubscribeStates.fish, F.text.in_(FISH_LIST))
-async def subscribe_fish(message: Message, state: FSMContext, _: dict = None):
-    if _ is None:
-        _ = get_lang_dict(message.from_user.id)
+async def subscribe_fish(message: Message, state: FSMContext):
+    _ = get_lang_dict(message.from_user.id)
     await state.update_data(fish=message.text)
     await state.set_state(SubscribeStates.hour)
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -1162,9 +1135,8 @@ async def subscribe_fish(message: Message, state: FSMContext, _: dict = None):
     await message.answer("Оберіть час надсилання:", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("sub_hour_"))
-async def subscribe_hour(callback: CallbackQuery, state: FSMContext, _: dict = None):
-    if _ is None:
-        _ = get_lang_dict(callback.from_user.id)
+async def subscribe_hour(callback: CallbackQuery, state: FSMContext):
+    _ = get_lang_dict(callback.from_user.id)
     hour = int(callback.data.split("_")[2])
     data = await state.get_data()
     add_subscription(callback.from_user.id, data['region'], data['fish'], hour)
@@ -1174,11 +1146,10 @@ async def subscribe_hour(callback: CallbackQuery, state: FSMContext, _: dict = N
     await state.clear()
     await callback.answer()
 
-# ====================== ВОДОЙМИ ======================
+# ------ ВОДОЙМИ ------
 @dp.message(F.text == "🗺️ Водойми")
-async def show_water_bodies(message: Message, state: FSMContext, _: dict = None):
-    if _ is None:
-        _ = get_lang_dict(message.from_user.id)
+async def show_water_bodies(message: Message, state: FSMContext):
+    _ = get_lang_dict(message.from_user.id)
     data = await state.get_data()
     region = data.get("region")
     if not region:
@@ -1194,11 +1165,10 @@ async def show_water_bodies(message: Message, state: FSMContext, _: dict = None)
         text += f"• <a href='{url}'>{b['name']}</a>\n"
     await message.answer(text, parse_mode="HTML", disable_web_page_preview=True)
 
-# ====================== СЕЗОНИ ======================
+# ------ СЕЗОН ------
 @dp.message(F.text == "🗓 Сезон")
-async def show_season(message: Message, state: FSMContext, _: dict = None):
-    if _ is None:
-        _ = get_lang_dict(message.from_user.id)
+async def show_season(message: Message, state: FSMContext):
+    _ = get_lang_dict(message.from_user.id)
     data = await state.get_data()
     fish = data.get("fish")
     if not fish:
@@ -1211,11 +1181,10 @@ async def show_season(message: Message, state: FSMContext, _: dict = None):
         parse_mode="HTML"
     )
 
-# ====================== ТРОФЕЇ ======================
+# ------ ТРОФЕЇ ------
 @dp.message(F.text == "🎯 Мої трофеї")
-async def my_trophies(message: Message, state: FSMContext, _: dict = None):
-    if _ is None:
-        _ = get_lang_dict(message.from_user.id)
+async def my_trophies(message: Message, state: FSMContext):
+    _ = get_lang_dict(message.from_user.id)
     rows = get_user_catches(message.from_user.id)
     if not rows:
         await message.answer("У вас поки немає записаних уловів.\nНадішліть /add_catch або скористайтеся кнопкою нижче.")
@@ -1279,7 +1248,7 @@ async def add_catch_photo(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("✅ Трофей збережено з фото!")
 
-# ====================== МОВА ======================
+# ------ МОВА ------
 @dp.message(F.text == "🌐 Змінити мову")
 async def change_language(message: Message, state: FSMContext):
     await state.set_state(LanguageStates.choose_language)
@@ -1293,7 +1262,14 @@ async def set_language(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.answer()
 
-# ====================== ШТОРМОВЕ ПОПЕРЕДЖЕННЯ ТА РОЗСИЛКА (ФОН) ======================
+# ------ ЗАГАЛЬНИЙ ОБРОБНИК (fallback) ------
+@dp.message()
+async def fallback(message: Message, state: FSMContext):
+    if await state.get_state() is None:
+        _ = get_lang_dict(message.from_user.id)
+        await message.answer("Натисніть /start", reply_markup=get_regions_keyboard())
+
+# ====================== ФОНОВІ ЗАВДАННЯ ======================
 async def check_extreme_weather():
     subs = get_subscriptions()
     for user_id, region, fish_type, _ in subs:
@@ -1308,8 +1284,7 @@ async def check_extreme_weather():
                 recent = pressures[-12:]
                 delta = (recent[-1] - recent[0]) * 0.75006 if recent[-1] and recent[0] else 0
                 if delta < -5:
-                    lang = get_user_lang(user_id)
-                    _ = LANGUAGES.get(lang, LANGUAGES["uk"])
+                    _ = get_lang_dict(user_id)
                     await bot.send_message(user_id, _["weather_alert"].format(delta=delta), parse_mode="HTML")
         except Exception as e:
             logging.error(f"Помилка штормового попередження для {user_id}: {e}")
@@ -1322,8 +1297,7 @@ async def send_daily_forecasts():
             client = MultiSourceWeatherClient(coords["lat"], coords["lon"])
             result = await client.evaluate_biting(fish_type, region, hour, day_offset=0)
             if result:
-                lang = get_user_lang(user_id)
-                _ = LANGUAGES.get(lang, LANGUAGES["uk"])
+                _ = get_lang_dict(user_id)
                 text = f"🌅 <b>Ранковий прогноз</b>\n{region} | {fish_type}\n⭐ {result['stars']}/5\nПогода: {result['temperature']}°C, вітер {result['wind_ms']} м/с\nСьогодні о {hour:02d}:00"
                 await bot.send_message(user_id, text, parse_mode="HTML")
         except Exception as e:
