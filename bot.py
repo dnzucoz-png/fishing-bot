@@ -1402,8 +1402,9 @@ async def run_forecast(message: Message, state: FSMContext, hour: int, callback_
     image = make_image(result, region, body["name"], fish)
 
     if image:
+        from aiogram.types import BufferedInputFile
         await message.answer_photo(
-            photo=image,
+            photo=BufferedInputFile(image, filename="forecast.png"),
             caption=text,
             reply_markup=kb,
             parse_mode="HTML",
