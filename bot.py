@@ -1,7 +1,6 @@
 import asyncio
 import io
 import logging
-import math
 import os
 import sqlite3
 import time
@@ -39,12 +38,11 @@ GROUP_URL = os.getenv("GROUP_URL", "https://t.me/+rKxYkNg85aAwNzFi")
 DB_FILE = os.getenv("DB_FILE", "fishing_forecast.db")
 PORT = int(os.getenv("PORT", "10000"))
 
-CACHE_TTL = 4 * 60 * 60          # 4 години, щоб рідше звертатися до API
-RATE_LIMIT_COOLDOWN = 10 * 60     # 10 хвилин очікування після 429
+CACHE_TTL = 4 * 60 * 60          # 4 години
+RATE_LIMIT_COOLDOWN = 10 * 60     # 10 хвилин
 HTTP_TIMEOUT = 20
 MAX_RETRIES = 2
 
-# Области використовуються тільки як fallback/географія.
 REGIONS = {
     "Дніпропетровська": {"lat": 48.4647, "lon": 35.0462},
     "Київська": {"lat": 50.4501, "lon": 30.5234},
@@ -126,6 +124,81 @@ LANG = {
         ),
         "history_empty": "У вас поки немає збережених прогнозів.",
         "subscribe_done": "✅ Підписку збережено.",
+        "forecast_header": "🎣 <b>ПРОГНОЗ КЛЁВУ</b>",
+        "body_label": "🗺 <b>Водойма:</b>",
+        "coords_label": "📍 <b>Координати:</b>",
+        "fish_label": "🐟 <b>Риба:</b>",
+        "stars_label": "⭐ <b>Оцінка:</b>",
+        "score_label": "📊",
+        "temp_air": "🌡 Повітря:",
+        "temp_water": "💧 Вода:",
+        "pressure": "🌀 Тиск:",
+        "pressure_trend": "   {trend}",
+        "pressure_stability": "   {stability}",
+        "wind": "💨 Вітер:",
+        "humidity": "💧 Вологість:",
+        "cloud": "☁️ Хмарність:",
+        "precip": "🌧 Опади:",
+        "moon": "🌙",
+        "comfort": "🌤 Комфорт:",
+        "recommendations": "💡 <b>Рекомендації:</b>",
+        "footer": "📦 <i>Погода: Open-Meteo. Координати — вибрана водойма.</i>",
+        "grade_excellent": "🟢 Відмінно",
+        "grade_good": "🟡 Добре",
+        "grade_medium": "🟠 Середньо",
+        "grade_bad": "🔴 Погано",
+        "verdict_excellent": "🏆 Відмінні умови.",
+        "verdict_good": "⚖️ Хороші умови.",
+        "verdict_medium": "🟠 Середні умови.",
+        "verdict_bad": "🔴 Складні умови.",
+        "bait": "🎣 Насадка:",
+        "predator_tip": "🎯 Для {fish}: шукайте бровки, перепади глибини, течію.",
+        "peaceful_tip": "🎯 Для {fish}: точкове прикормлення і акуратна подача.",
+        "hot_tip": "• Спека — шукайте глибину, тінь і течію.",
+        "cold_tip": "• Холодна вода — повільна подача і дрібна насадка.",
+        "calm_wind": "💨 Штиль: {wind} м/с ({dir}).",
+        "normal_wind": "💨 Вітер: {wind} м/с ({dir}) — робочий діапазон.",
+        "strong_wind": "💨 Сильний вітер: {wind} м/с ({dir}).",
+        "precip_short": "🌧 Опади: {precip} мм.",
+        "cloud_short": "☁️ Хмарність: {cloud}%.",
+        "sunrise": "🌅 Світанок",
+        "sunset": "🌇 Захід сонця",
+        "night": "🌙 Ніч",
+        "day": "☀️ День",
+        "morning_activity": "ранкова активність",
+        "evening_activity": "вечірня активність",
+        "night_possible": "можливий нічний кльов",
+        "day_normal": "звичайна денна активність",
+        "moon_new": "🌑 Новомісяць",
+        "moon_waxing": "🌒 Зростаючий",
+        "moon_first_quarter": "🌓 Перша чверть",
+        "moon_full": "🌕 Повня",
+        "moon_waning": "🌖 Спадаючий",
+        "moon_last_quarter": "🌗 Остання чверть",
+        "moon_old": "🌘 Старий місяць",
+        "pressure_drop_strong": "📉 Сильно падає",
+        "pressure_drop_slow": "📉 Повільно падає",
+        "pressure_rise_strong": "📈 Сильно зростає",
+        "pressure_rise_slow": "📈 Повільно зростає",
+        "pressure_stable": "✅ Стабільний",
+        "pressure_stability_very": "✅ Дуже стабільний",
+        "pressure_stability_good": "✅ Стабільний",
+        "pressure_stability_changing": "⚠️ Змінюється",
+        "pressure_stability_sharp": "❌ Різко змінюється",
+        "share_text": "📢 <b>{name} поділився прогнозом!</b>\n🎣 {fish}\n⭐ {stars}/5 {graphic}\n💬 Приєднуйтесь до риболовного клубу!",
+        "history_title": "📜 <b>Останні прогнози:</b>",
+        "season_title": "🗓 <b>Сезонність:</b>",
+        "season_warning": "\n⚠️ Це довідкова інформація. Перед риболовлею перевіряйте діючі місцеві обмеження.",
+        "trophies_empty": "У вас поки немає трофеїв.\nВикористовуйте /add_catch.",
+        "trophies_title": "🏆 <b>Ваші трофеї:</b>",
+        "catch_prompt_fish": "Введіть назву риби:",
+        "catch_prompt_weight": "Введіть вагу в грамах:",
+        "catch_prompt_length": "Введіть довжину в сантиметрах:",
+        "catch_prompt_location": "Введіть місце ловлі:",
+        "catch_prompt_photo": "Надішліть фото або напишіть /skip_photo.",
+        "catch_saved": "✅ Трофей збережено!",
+        "catch_saved_photo": "✅ Трофей збережено з фото!",
+        "language_changed": "Мову змінено на українську.",
     },
     "ru": {
         "start": (
@@ -153,7 +226,82 @@ LANG = {
         ),
         "history_empty": "У вас пока нет сохранённых прогнозов.",
         "subscribe_done": "✅ Подписка сохранена.",
-    },
+        "forecast_header": "🎣 <b>ПРОГНОЗ КЛЁВА</b>",
+        "body_label": "🗺 <b>Водоём:</b>",
+        "coords_label": "📍 <b>Координаты:</b>",
+        "fish_label": "🐟 <b>Рыба:</b>",
+        "stars_label": "⭐ <b>Оценка:</b>",
+        "score_label": "📊",
+        "temp_air": "🌡 Воздух:",
+        "temp_water": "💧 Вода:",
+        "pressure": "🌀 Давление:",
+        "pressure_trend": "   {trend}",
+        "pressure_stability": "   {stability}",
+        "wind": "💨 Ветер:",
+        "humidity": "💧 Влажность:",
+        "cloud": "☁️ Облачность:",
+        "precip": "🌧 Осадки:",
+        "moon": "🌙",
+        "comfort": "🌤 Комфорт:",
+        "recommendations": "💡 <b>Рекомендации:</b>",
+        "footer": "📦 <i>Погода: Open-Meteo. Координаты — выбранный водоём.</i>",
+        "grade_excellent": "🟢 Отлично",
+        "grade_good": "🟡 Хорошо",
+        "grade_medium": "🟠 Средне",
+        "grade_bad": "🔴 Плохо",
+        "verdict_excellent": "🏆 Отличные условия.",
+        "verdict_good": "⚖️ Хорошие условия.",
+        "verdict_medium": "🟠 Средние условия.",
+        "verdict_bad": "🔴 Сложные условия.",
+        "bait": "🎣 Насадка:",
+        "predator_tip": "🎯 Для {fish}: ищите бровки, перепады глубины, течение.",
+        "peaceful_tip": "🎯 Для {fish}: точечная прикормка и аккуратная подача.",
+        "hot_tip": "• Спека — ищите глубину, тень и течение.",
+        "cold_tip": "• Холодная вода — медленная подача и мелкая насадка.",
+        "calm_wind": "💨 Штиль: {wind} м/с ({dir}).",
+        "normal_wind": "💨 Ветер: {wind} м/с ({dir}) — рабочий диапазон.",
+        "strong_wind": "💨 Сильный ветер: {wind} м/с ({dir}).",
+        "precip_short": "🌧 Осадки: {precip} мм.",
+        "cloud_short": "☁️ Облачность: {cloud}%.",
+        "sunrise": "🌅 Светание",
+        "sunset": "🌇 Закат",
+        "night": "🌙 Ночь",
+        "day": "☀️ День",
+        "morning_activity": "утренняя активность",
+        "evening_activity": "вечерняя активность",
+        "night_possible": "возможен ночной клёв",
+        "day_normal": "обычная дневная активность",
+        "moon_new": "🌑 Новолуние",
+        "moon_waxing": "🌒 Растущая",
+        "moon_first_quarter": "🌓 Первая четверть",
+        "moon_full": "🌕 Полнолуние",
+        "moon_waning": "🌖 Убывающая",
+        "moon_last_quarter": "🌗 Последняя четверть",
+        "moon_old": "🌘 Старый месяц",
+        "pressure_drop_strong": "📉 Сильно падает",
+        "pressure_drop_slow": "📉 Медленно падает",
+        "pressure_rise_strong": "📈 Сильно растёт",
+        "pressure_rise_slow": "📈 Медленно растёт",
+        "pressure_stable": "✅ Стабильный",
+        "pressure_stability_very": "✅ Очень стабильный",
+        "pressure_stability_good": "✅ Стабильный",
+        "pressure_stability_changing": "⚠️ Меняется",
+        "pressure_stability_sharp": "❌ Резко меняется",
+        "share_text": "📢 <b>{name} поделился прогнозом!</b>\n🎣 {fish}\n⭐ {stars}/5 {graphic}\n💬 Присоединяйтесь к рыболовному клубу!",
+        "history_title": "📜 <b>Последние прогнозы:</b>",
+        "season_title": "🗓 <b>Сезонность:</b>",
+        "season_warning": "\n⚠️ Это справочная информация. Перед рыбалкой проверяйте действующие местные ограничения.",
+        "trophies_empty": "У вас пока нет трофеев.\nИспользуйте /add_catch.",
+        "trophies_title": "🏆 <b>Ваши трофеи:</b>",
+        "catch_prompt_fish": "Введите название рыбы:",
+        "catch_prompt_weight": "Введите вес в граммах:",
+        "catch_prompt_length": "Введите длину в сантиметрах:",
+        "catch_prompt_location": "Введите место ловли:",
+        "catch_prompt_photo": "Отправьте фото или напишите /skip_photo.",
+        "catch_saved": "✅ Трофей сохранён!",
+        "catch_saved_photo": "✅ Трофей сохранён с фото!",
+        "language_changed": "Язык изменён на русский.",
+    }
 }
 
 
@@ -399,32 +547,56 @@ def get_wind_direction(deg) -> str:
     return dirs[round(float(deg) / 45) % 8]
 
 
-def moon_phase(dt: datetime):
+def moon_phase(dt: datetime, lang: str = "uk"):
     known = datetime(2024, 1, 11)
     age = (dt.date() - known.date()).days % 29.53
-    if age < 1.8:
-        return "🌑 Новомісяць", -6
-    if age < 7.4:
-        return "🌒 Зростаючий", 4
-    if age < 11.1:
-        return "🌓 Перша чверть", 6
-    if age < 16.5:
-        return "🌕 Повня", 10
-    if age < 22.1:
-        return "🌖 Спадаючий", 5
-    if age < 25.8:
-        return "🌗 Остання чверть", 3
-    return "🌘 Старий місяць", -4
+    if lang == "uk":
+        if age < 1.8:
+            return "🌑 Новомісяць", -6
+        if age < 7.4:
+            return "🌒 Зростаючий", 4
+        if age < 11.1:
+            return "🌓 Перша чверть", 6
+        if age < 16.5:
+            return "🌕 Повня", 10
+        if age < 22.1:
+            return "🌖 Спадаючий", 5
+        if age < 25.8:
+            return "🌗 Остання чверть", 3
+        return "🌘 Старий місяць", -4
+    else:
+        if age < 1.8:
+            return "🌑 Новолуние", -6
+        if age < 7.4:
+            return "🌒 Растущая", 4
+        if age < 11.1:
+            return "🌓 Первая четверть", 6
+        if age < 16.5:
+            return "🌕 Полнолуние", 10
+        if age < 22.1:
+            return "🌖 Убывающая", 5
+        if age < 25.8:
+            return "🌗 Последняя четверть", 3
+        return "🌘 Старый месяц", -4
 
 
-def sun_activity(hour):
-    if 4 <= hour <= 7:
-        return "🌅 Світанок", "ранкова активність", 16
-    if 19 <= hour <= 21:
-        return "🌇 Захід сонця", "вечірня активність", 14
-    if hour >= 22 or hour < 4:
-        return "🌙 Ніч", "можливий нічний кльов", 4
-    return "☀️ День", "звичайна денна активність", 0
+def sun_activity(hour, lang: str = "uk"):
+    if lang == "uk":
+        if 4 <= hour <= 7:
+            return "🌅 Світанок", "ранкова активність", 16
+        if 19 <= hour <= 21:
+            return "🌇 Захід сонця", "вечірня активність", 14
+        if hour >= 22 or hour < 4:
+            return "🌙 Ніч", "можливий нічний кльов", 4
+        return "☀️ День", "звичайна денна активність", 0
+    else:
+        if 4 <= hour <= 7:
+            return "🌅 Рассвет", "утренняя активность", 16
+        if 19 <= hour <= 21:
+            return "🌇 Закат", "вечерняя активность", 14
+        if hour >= 22 or hour < 4:
+            return "🌙 Ночь", "возможен ночной клёв", 4
+        return "☀️ День", "обычная дневная активность", 0
 
 
 def nearest_region(lat, lon):
@@ -466,7 +638,7 @@ def bait(fish, water_temp, wind):
 
 
 # ============================================================
-# OPEN-METEO (з покращеннями проти 429)
+# OPEN-METEO (з покращеннями)
 # ============================================================
 
 weather_cache = {}
@@ -501,7 +673,8 @@ class WeatherClient:
             "wind_speed_unit": "ms",
         }
         if model:
-            params["models"] = model
+            # В Open-Meteo параметр называется "models" и принимает массив
+            params["models"] = [model]
 
         url = "https://api.open-meteo.com/v1/forecast"
 
@@ -550,8 +723,6 @@ class WeatherClient:
 
         return cached["data"] if cached else None
 
-    # Решта методів (pressure_score, pressure_trend, pressure_stability, temp_score, wind_score, precip_score, cloud_score, star_score, nearest_hour_index, evaluate) залишаються без змін, тому я їх не переписую повністю, але в повному коді вони будуть.
-    # У цьому файлі я надам повний код з усіма методами.
     @staticmethod
     def pressure_score(mm, predator):
         optimum = 748 if predator else 752
@@ -563,28 +734,41 @@ class WeatherClient:
         return -18
 
     @staticmethod
-    def pressure_trend(pressures, idx):
+    def pressure_trend(pressures, idx, lang="uk"):
         if idx < 24: return "Н/Д", 0
         recent = [x for x in pressures[idx - 12:idx + 1] if x is not None]
         old = [x for x in pressures[idx - 24:idx - 12] if x is not None]
         if len(recent) < 5 or len(old) < 5: return "Н/Д", 0
         delta = (sum(recent) / len(recent) - sum(old) / len(old)) * 0.75006
-        if delta < -2.5: return "📉 Сильно падает", 12
-        if delta < -0.8: return "📉 Медленно падает", 8
-        if delta > 2.5: return "📈 Сильно растёт", -6
-        if delta > 0.8: return "📈 Медленно растёт", 2
-        return "✅ Стабильный", 10
+        if lang == "uk":
+            if delta < -2.5: return "📉 Сильно падає", 12
+            if delta < -0.8: return "📉 Повільно падає", 8
+            if delta > 2.5: return "📈 Сильно зростає", -6
+            if delta > 0.8: return "📈 Повільно зростає", 2
+            return "✅ Стабільний", 10
+        else:
+            if delta < -2.5: return "📉 Сильно падает", 12
+            if delta < -0.8: return "📉 Медленно падает", 8
+            if delta > 2.5: return "📈 Сильно растёт", -6
+            if delta > 0.8: return "📈 Медленно растёт", 2
+            return "✅ Стабильный", 10
 
     @staticmethod
-    def pressure_stability(pressures, idx):
+    def pressure_stability(pressures, idx, lang="uk"):
         if idx < 48: return "Н/Д", 0
         values = [x for x in pressures[idx - 48:idx + 1] if x is not None]
         if len(values) < 20: return "Н/Д", 0
         spread = max(values) - min(values)
-        if spread <= 4: return "✅ Очень стабильный", 12
-        if spread <= 7: return "✅ Стабильный", 6
-        if spread <= 11: return "⚠️ Меняется", -4
-        return "❌ Резко меняется", -16
+        if lang == "uk":
+            if spread <= 4: return "✅ Дуже стабільний", 12
+            if spread <= 7: return "✅ Стабільний", 6
+            if spread <= 11: return "⚠️ Змінюється", -4
+            return "❌ Різко змінюється", -16
+        else:
+            if spread <= 4: return "✅ Очень стабильный", 12
+            if spread <= 7: return "✅ Стабильный", 6
+            if spread <= 11: return "⚠️ Меняется", -4
+            return "❌ Резко меняется", -16
 
     @staticmethod
     def temp_score(water, predator):
@@ -658,7 +842,7 @@ class WeatherClient:
                 continue
         return best_i
 
-    async def evaluate(self, fish, hour, day_offset):
+    async def evaluate(self, fish, hour, day_offset, user_id):
         data = await self.get()
         if not data:
             return None
@@ -690,10 +874,11 @@ class WeatherClient:
         direction = get_wind_direction(wind_deg)
         water_temp = round(max(0, min(30, temp * 0.82 + 3.2)), 1)
         predator = fish in PREDATORS
+        lang = get_user_lang(user_id)
 
         score = 48
-        trend_text, trend_pts = self.pressure_trend(h.get("surface_pressure", []), idx)
-        stability_text, stability_pts = self.pressure_stability(h.get("surface_pressure", []), idx)
+        trend_text, trend_pts = self.pressure_trend(h.get("surface_pressure", []), idx, lang)
+        stability_text, stability_pts = self.pressure_stability(h.get("surface_pressure", []), idx, lang)
         score += trend_pts + stability_pts
         score += self.pressure_score(pressure_mm, predator)
         score += self.temp_score(water_temp, predator)
@@ -701,9 +886,9 @@ class WeatherClient:
         score += self.precip_score(precip, predator)
         score += self.cloud_score(cloud, predator)
 
-        sun_title, sun_desc, sun_pts = sun_activity(hour)
+        sun_title, sun_desc, sun_pts = sun_activity(hour, lang)
         score += sun_pts
-        moon_text, moon_pts = moon_phase(target_date)
+        moon_text, moon_pts = moon_phase(target_date, lang)
         score += moon_pts if predator else int(moon_pts * 0.5)
         score = max(0, min(100, int(score)))
         stars = self.star_score(score)
@@ -730,48 +915,85 @@ class WeatherClient:
         comfort = max(0, min(100, comfort))
 
         if day_offset == 0:
-            day_name = "Сьогодні"
+            day_name = "Сьогодні" if lang == "uk" else "Сегодня"
         elif day_offset == 1:
-            day_name = "Завтра"
+            day_name = "Завтра" if lang == "uk" else "Завтра"
         elif day_offset == 2:
-            day_name = "Післязавтра"
+            day_name = "Післязавтра" if lang == "uk" else "Послезавтра"
         else:
             day_name = target.strftime("%d.%m.%Y")
 
         commentary = []
-        commentary.append(f"⏱ <b>{sun_title}:</b> {sun_desc}.")
-        commentary.append(f"🌀 <b>Тиск:</b> {pressure_mm:.1f} мм | {trend_text} | {stability_text}")
-        commentary.append(f"🌡 <b>Температура:</b> повітря {temp:.1f}°C, вода орієнтовно ~{water_temp:.1f}°C")
-        if water_temp > 25:
-            commentary.append("• Спека — ищите глубину, тень и течение.")
-        elif water_temp < 9:
-            commentary.append("• Холодная вода — медленная подача и мелкая насадка.")
-        if wind < 2:
-            commentary.append(f"💨 Штиль: {wind:.1f} м/с ({direction}).")
-        elif wind <= 6:
-            commentary.append(f"💨 Ветер: {wind:.1f} м/с ({direction}) — рабочий диапазон.")
+
+        # Локализованные подсказки
+        if lang == "uk":
+            commentary.append(f"⏱ <b>{sun_title}:</b> {sun_desc}.")
+            commentary.append(f"🌀 <b>Тиск:</b> {pressure_mm:.1f} мм | {trend_text} | {stability_text}")
+            commentary.append(f"🌡 <b>Температура:</b> повітря {temp:.1f}°C, вода орієнтовно ~{water_temp:.1f}°C")
+            if water_temp > 25:
+                commentary.append("• Спека — шукайте глибину, тінь і течію.")
+            elif water_temp < 9:
+                commentary.append("• Холодна вода — повільна подача і дрібна насадка.")
+            if wind < 2:
+                commentary.append(f"💨 Штиль: {wind:.1f} м/с ({direction}).")
+            elif wind <= 6:
+                commentary.append(f"💨 Вітер: {wind:.1f} м/с ({direction}) — робочий діапазон.")
+            else:
+                commentary.append(f"💨 Сильний вітер: {wind:.1f} м/с ({direction}).")
+            if precip > 1.5:
+                commentary.append(f"🌧 Опади: {precip:.1f} мм.")
+            else:
+                commentary.append(f"☁️ Хмарність: {cloud:.0f}%.")
+            commentary.append(f"🌕 {moon_text}")
+            commentary.append(f"🌤 Комфорт: {comfort}/100")
+            commentary.append(f"🎣 Насадка: {bait(fish, water_temp, wind)}")
+            if predator:
+                commentary.append(f"🎯 Для {fish}: шукайте бровки, перепади глибини, течію.")
+            else:
+                commentary.append(f"🎯 Для {fish}: точкове прикормлення і акуратна подача.")
+            if score >= 78:
+                verdict = "🏆 Відмінні умови."
+            elif score >= 55:
+                verdict = "⚖️ Хороші умови."
+            elif score >= 40:
+                verdict = "🟠 Середні умови."
+            else:
+                verdict = "🔴 Складні умови."
+            commentary.append(f"\n{verdict}")
         else:
-            commentary.append(f"💨 Сильный ветер: {wind:.1f} м/с ({direction}).")
-        if precip > 1.5:
-            commentary.append(f"🌧 Осадки: {precip:.1f} мм.")
-        else:
-            commentary.append(f"☁️ Облачность: {cloud:.0f}%.")
-        commentary.append(f"🌕 {moon_text}")
-        commentary.append(f"🌤 Комфорт: {comfort}/100")
-        commentary.append(f"🎣 Насадка: {bait(fish, water_temp, wind)}")
-        if predator:
-            commentary.append(f"🎯 Для {fish}: ищите бровки, перепады глубины, течение.")
-        else:
-            commentary.append(f"🎯 Для {fish}: точечная прикормка и аккуратная подача.")
-        if score >= 78:
-            verdict = "🏆 Отличные условия."
-        elif score >= 55:
-            verdict = "⚖️ Хорошие условия."
-        elif score >= 40:
-            verdict = "🟠 Средние условия."
-        else:
-            verdict = "🔴 Сложные условия."
-        commentary.append(f"\n{verdict}")
+            commentary.append(f"⏱ <b>{sun_title}:</b> {sun_desc}.")
+            commentary.append(f"🌀 <b>Давление:</b> {pressure_mm:.1f} мм | {trend_text} | {stability_text}")
+            commentary.append(f"🌡 <b>Температура:</b> воздух {temp:.1f}°C, вода ориентировочно ~{water_temp:.1f}°C")
+            if water_temp > 25:
+                commentary.append("• Спека — ищите глубину, тень и течение.")
+            elif water_temp < 9:
+                commentary.append("• Холодная вода — медленная подача и мелкая насадка.")
+            if wind < 2:
+                commentary.append(f"💨 Штиль: {wind:.1f} м/с ({direction}).")
+            elif wind <= 6:
+                commentary.append(f"💨 Ветер: {wind:.1f} м/с ({direction}) — рабочий диапазон.")
+            else:
+                commentary.append(f"💨 Сильный ветер: {wind:.1f} м/с ({direction}).")
+            if precip > 1.5:
+                commentary.append(f"🌧 Осадки: {precip:.1f} мм.")
+            else:
+                commentary.append(f"☁️ Облачность: {cloud:.0f}%.")
+            commentary.append(f"🌕 {moon_text}")
+            commentary.append(f"🌤 Комфорт: {comfort}/100")
+            commentary.append(f"🎣 Насадка: {bait(fish, water_temp, wind)}")
+            if predator:
+                commentary.append(f"🎯 Для {fish}: ищите бровки, перепады глубины, течение.")
+            else:
+                commentary.append(f"🎯 Для {fish}: точечная прикормка и аккуратная подача.")
+            if score >= 78:
+                verdict = "🏆 Отличные условия."
+            elif score >= 55:
+                verdict = "⚖️ Хорошие условия."
+            elif score >= 40:
+                verdict = "🟠 Средние условия."
+            else:
+                verdict = "🔴 Сложные условия."
+            commentary.append(f"\n{verdict}")
 
         return {
             "fish": fish,
@@ -818,11 +1040,12 @@ def _load_fonts():
             return font, bold_f, small
         except Exception:
             continue
+    # Если шрифты не найдены, используем дефолтный (может не поддерживать кириллицу)
     default = ImageFont.load_default()
     return default, default, default
 
 
-def make_image(result, region, body_name, fish):
+def make_image(result, region, body_name, fish, user_id):
     try:
         img = Image.new("RGB", (1000, 650), (240, 248, 255))
         draw = ImageDraw.Draw(img)
@@ -835,28 +1058,44 @@ def make_image(result, region, body_name, fish):
         stars = "⭐" * result["stars"] + "☆" * (5 - result["stars"])
         draw.text((30, 150), f"Оценка: {result['stars']}/5 {stars}  ({result['score_100']}/100)", font=bold, fill=(180, 100, 0))
 
-        rows = [
-            f"Температура воздуха: {result['temperature']}°C",
-            f"Вода: ~{result['water_temp']}°C (оценка)",
-            f"Давление: {result['pressure_mm']} мм",
-            f"Ветер: {result['wind_ms']} м/с ({result['wind_dir']})",
-            f"Влажность: {result['humidity']}%",
-            f"Облачность: {result['cloud_cover']}%",
-            f"Осадки: {result['precipitation']} мм",
-            f"Комфорт: {result['comfort_index']}/100",
-        ]
+        # Используем локализованные подписи
+        lang = get_user_lang(user_id)
+        if lang == "uk":
+            rows = [
+                f"Температура повітря: {result['temperature']}°C",
+                f"Вода: ~{result['water_temp']}°C (оцінка)",
+                f"Тиск: {result['pressure_mm']} мм",
+                f"Вітер: {result['wind_ms']} м/с ({result['wind_dir']})",
+                f"Вологість: {result['humidity']}%",
+                f"Хмарність: {result['cloud_cover']}%",
+                f"Опади: {result['precipitation']} мм",
+                f"Комфорт: {result['comfort_index']}/100",
+            ]
+        else:
+            rows = [
+                f"Температура воздуха: {result['temperature']}°C",
+                f"Вода: ~{result['water_temp']}°C (оценка)",
+                f"Давление: {result['pressure_mm']} мм",
+                f"Ветер: {result['wind_ms']} м/с ({result['wind_dir']})",
+                f"Влажность: {result['humidity']}%",
+                f"Облачность: {result['cloud_cover']}%",
+                f"Осадки: {result['precipitation']} мм",
+                f"Комфорт: {result['comfort_index']}/100",
+            ]
         y = 205
         for row in rows:
             draw.text((30, y), row, font=font, fill=(0, 0, 0))
             y += 38
         draw.line((30, y + 5, 970, y + 5), fill=(180, 180, 180), width=2)
         y += 25
-        verdict = (
-            "ОТЛИЧНЫЕ УСЛОВИЯ" if result["score_100"] >= 78
-            else "ХОРОШИЕ УСЛОВИЯ" if result["score_100"] >= 55
-            else "СРЕДНИЕ УСЛОВИЯ" if result["score_100"] >= 40
-            else "СЛОЖНЫЕ УСЛОВИЯ"
-        )
+        if result["score_100"] >= 78:
+            verdict = "ВІДМІННІ УМОВИ" if lang == "uk" else "ОТЛИЧНЫЕ УСЛОВИЯ"
+        elif result["score_100"] >= 55:
+            verdict = "ХОРОШІ УМОВИ" if lang == "uk" else "ХОРОШИЕ УСЛОВИЯ"
+        elif result["score_100"] >= 40:
+            verdict = "СЕРЕДНІ УМОВИ" if lang == "uk" else "СРЕДНИЕ УСЛОВИЯ"
+        else:
+            verdict = "СКЛАДНІ УМОВИ" if lang == "uk" else "СЛОЖНЫЕ УСЛОВИЯ"
         draw.text((30, y), verdict, font=bold, fill=(0, 100, 0))
         out = io.BytesIO()
         img.save(out, format="PNG")
@@ -868,7 +1107,7 @@ def make_image(result, region, body_name, fish):
 
 
 # ============================================================
-# KEYBOARDS
+# KEYBOARDS (без изменений)
 # ============================================================
 
 def regions_keyboard():
@@ -1213,7 +1452,7 @@ async def run_forecast(message: Message, state: FSMContext, hour: int, callback_
     await message.answer(T(user_id, "processing"))
 
     client = WeatherClient(body["lat"], body["lon"])
-    result = await client.evaluate(fish, hour, day_offset)
+    result = await client.evaluate(fish, hour, day_offset, user_id)
 
     if not result:
         await message.answer(T(user_id, "rate"), reply_markup=regions_keyboard())
@@ -1223,37 +1462,39 @@ async def run_forecast(message: Message, state: FSMContext, hour: int, callback_
     forecast_id = save_forecast(user_id, region, body, fish, result)
 
     stars = "⭐" * result["stars"] + "☆" * (5 - result["stars"])
+    lang = get_user_lang(user_id)
     if result["score_100"] >= 80:
-        grade = "🟢 Отлично"
+        grade = T(user_id, "grade_excellent")
     elif result["score_100"] >= 60:
-        grade = "🟡 Хорошо"
+        grade = T(user_id, "grade_good")
     elif result["score_100"] >= 40:
-        grade = "🟠 Средне"
+        grade = T(user_id, "grade_medium")
     else:
-        grade = "🔴 Плохо"
+        grade = T(user_id, "grade_bad")
 
+    # Формируем текст прогноза с локализацией
     text = (
-        f"🎣 <b>ПРОГНОЗ КЛЁВА</b>\n\n"
-        f"🗺 <b>Водоём:</b> {body['name']}\n"
-        f"📍 <b>Координаты:</b> {body['lat']:.5f}, {body['lon']:.5f}\n"
+        f"{T(user_id, 'forecast_header')}\n\n"
+        f"{T(user_id, 'body_label')} {body['name']}\n"
+        f"{T(user_id, 'coords_label')} {body['lat']:.5f}, {body['lon']:.5f}\n"
         f"📅 {result['forecast_day']}\n"
         f"⏰ {result['hour']:02d}:00\n"
-        f"🐟 <b>{fish}</b>\n\n"
-        f"⭐ <b>{result['stars']}/5</b> {stars}\n"
-        f"📊 {grade} — {result['score_100']}/100\n\n"
-        f"🌡 Воздух: {result['temperature']}°C\n"
-        f"💧 Вода: ~{result['water_temp']}°C <i>(расчётная оценка)</i>\n"
-        f"🌀 Давление: {result['pressure_mm']} мм\n"
+        f"{T(user_id, 'fish_label')} {fish}\n\n"
+        f"{T(user_id, 'stars_label')} {result['stars']}/5 {stars}\n"
+        f"{T(user_id, 'score_label')} {grade} — {result['score_100']}/100\n\n"
+        f"{T(user_id, 'temp_air')} {result['temperature']}°C\n"
+        f"{T(user_id, 'temp_water')} ~{result['water_temp']}°C <i>(розрахункова оцінка)</i>\n"
+        f"{T(user_id, 'pressure')} {result['pressure_mm']} мм\n"
         f"   {result['pressure_trend']}\n"
         f"   {result['pressure_stability']}\n"
-        f"💨 Ветер: {result['wind_ms']} м/с, {result['wind_dir']}\n"
-        f"💧 Влажность: {result['humidity']}%\n"
-        f"☁️ Облачность: {result['cloud_cover']}%\n"
-        f"🌧 Осадки: {result['precipitation']} мм\n"
-        f"🌙 {result['moon_phase']}\n"
-        f"🌤 Комфорт: {result['comfort_index']}/100\n\n"
-        f"💡 <b>Рекомендации:</b>\n{result['expert_commentary']}\n\n"
-        f"📦 <i>Погода: Open-Meteo. Координаты — выбранный водоём.</i>"
+        f"{T(user_id, 'wind')} {result['wind_ms']} м/с, {result['wind_dir']}\n"
+        f"{T(user_id, 'humidity')} {result['humidity']}%\n"
+        f"{T(user_id, 'cloud')} {result['cloud_cover']}%\n"
+        f"{T(user_id, 'precip')} {result['precipitation']} мм\n"
+        f"{T(user_id, 'moon')} {result['moon_phase']}\n"
+        f"{T(user_id, 'comfort')} {result['comfort_index']}/100\n\n"
+        f"{T(user_id, 'recommendations')}\n{result['expert_commentary']}\n\n"
+        f"{T(user_id, 'footer')}"
     )
 
     maps_url = f"https://www.google.com/maps?q={body['lat']},{body['lon']}"
@@ -1268,7 +1509,7 @@ async def run_forecast(message: Message, state: FSMContext, hour: int, callback_
         [InlineKeyboardButton(text="🏠 Головне меню", callback_data="main_menu")],
     ])
 
-    image = make_image(result, region, body["name"], fish)
+    image = make_image(result, region, body["name"], fish, user_id)
     if image:
         await message.answer_photo(
             photo=BufferedInputFile(image, filename="forecast.png"),
@@ -1308,13 +1549,14 @@ async def share_handler(callback: CallbackQuery):
     try:
         _, stars, fish = callback.data.split("_", 2)
         graphic = "⭐" * int(stars) + "☆" * (5 - int(stars))
-        text = (
-            f"📢 <b>{callback.from_user.first_name} поделился прогнозом!</b>\n"
-            f"🎣 {fish}\n"
-            f"⭐ {stars}/5 {graphic}\n"
-            f"💬 Присоединяйтесь к рыболовному клубу!"
+        lang = get_user_lang(callback.from_user.id)
+        share_text = LANG[lang]["share_text"].format(
+            name=callback.from_user.first_name,
+            fish=fish,
+            stars=stars,
+            graphic=graphic
         )
-        await bot.send_message(GROUP_CHAT_ID, text, parse_mode="HTML")
+        await bot.send_message(GROUP_CHAT_ID, share_text, parse_mode="HTML")
         await callback.answer("✅ Отправлено в чат!", show_alert=True)
     except Exception as e:
         logging.exception("Share error: %s", e)
@@ -1329,7 +1571,7 @@ async def history_handler(message: Message):
     if not rows:
         await message.answer(T(message.from_user.id, "history_empty"))
         return
-    text = "📜 <b>Последние прогнозы:</b>\n\n"
+    text = T(message.from_user.id, "history_title") + "\n\n"
     for r in rows:
         stars = "⭐" * (r["stars"] or 0) + "☆" * (5 - (r["stars"] or 0))
         text += (
@@ -1431,13 +1673,11 @@ async def subscription_hour(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(F.text == "🗓 Сезон")
 async def season_handler(message: Message):
-    text = "🗓 <b>Сезонність:</b>\n\n"
+    lang = get_user_lang(message.from_user.id)
+    text = T(message.from_user.id, "season_title") + "\n\n"
     for fish, (start, end) in SPAWNING.items():
-        text += f"🐟 {fish}: {start}–{end} місяці\n"
-    text += (
-        "\n⚠️ Это справочная информация. Перед рыбалкой "
-        "проверяйте действующие местные ограничения."
-    )
+        text += f"🐟 {fish}: {start}–{end} місяці\n" if lang == "uk" else f"🐟 {fish}: {start}–{end} месяца\n"
+    text += T(message.from_user.id, "season_warning")
     await message.answer(text, parse_mode="HTML")
 
 
@@ -1447,9 +1687,9 @@ async def season_handler(message: Message):
 async def trophies(message: Message):
     rows = get_catches(message.from_user.id)
     if not rows:
-        await message.answer("У вас пока нет трофеев.\nИспользуйте /add_catch.")
+        await message.answer(T(message.from_user.id, "trophies_empty"))
         return
-    text = "🏆 <b>Ваши трофеи:</b>\n\n"
+    text = T(message.from_user.id, "trophies_title") + "\n\n"
     for r in rows:
         text += f"🐟 {r['fish_type']} — {r['weight']} г, {r['length']} см\n📍 {r['location']} | {r['date']}\n\n"
     await message.answer(text, parse_mode="HTML")
@@ -1458,14 +1698,14 @@ async def trophies(message: Message):
 @dp.message(Command("add_catch"))
 async def catch_start(message: Message, state: FSMContext):
     await state.set_state(TrophyStates.fish)
-    await message.answer("Введите название рыбы:")
+    await message.answer(T(message.from_user.id, "catch_prompt_fish"))
 
 
 @dp.message(TrophyStates.fish)
 async def catch_fish(message: Message, state: FSMContext):
     await state.update_data(fish=message.text)
     await state.set_state(TrophyStates.weight)
-    await message.answer("Введите вес в граммах:")
+    await message.answer(T(message.from_user.id, "catch_prompt_weight"))
 
 
 @dp.message(TrophyStates.weight)
@@ -1479,7 +1719,7 @@ async def catch_weight(message: Message, state: FSMContext):
         return
     await state.update_data(weight=value)
     await state.set_state(TrophyStates.length)
-    await message.answer("Введите длину в сантиметрах:")
+    await message.answer(T(message.from_user.id, "catch_prompt_length"))
 
 
 @dp.message(TrophyStates.length)
@@ -1493,14 +1733,14 @@ async def catch_length(message: Message, state: FSMContext):
         return
     await state.update_data(length=value)
     await state.set_state(TrophyStates.location)
-    await message.answer("Введите место ловли:")
+    await message.answer(T(message.from_user.id, "catch_prompt_location"))
 
 
 @dp.message(TrophyStates.location)
 async def catch_location(message: Message, state: FSMContext):
     await state.update_data(location=message.text)
     await state.set_state(TrophyStates.photo)
-    await message.answer("Отправьте фото или напишите /skip_photo.")
+    await message.answer(T(message.from_user.id, "catch_prompt_photo"))
 
 
 @dp.message(Command("skip_photo"), TrophyStates.photo)
@@ -1508,7 +1748,7 @@ async def catch_skip_photo(message: Message, state: FSMContext):
     data = await state.get_data()
     save_catch(message.from_user.id, data["fish"], data["weight"], data["length"], data["location"], None)
     await state.clear()
-    await message.answer("✅ Трофей сохранён!")
+    await message.answer(T(message.from_user.id, "catch_saved"))
 
 
 @dp.message(TrophyStates.photo, F.photo)
@@ -1516,7 +1756,7 @@ async def catch_photo(message: Message, state: FSMContext):
     data = await state.get_data()
     save_catch(message.from_user.id, data["fish"], data["weight"], data["length"], data["location"], message.photo[-1].file_id)
     await state.clear()
-    await message.answer("✅ Трофей сохранён с фото!")
+    await message.answer(T(message.from_user.id, "catch_saved_photo"))
 
 
 # ---------------- LANGUAGE ----------------
@@ -1538,13 +1778,12 @@ async def language_set(callback: CallbackQuery, state: FSMContext):
         return
     set_user_lang(callback.from_user.id, lang)
     await state.clear()
-    text = "Мову змінено на українську." if lang == "uk" else "Язык изменён на русский."
-    await callback.message.edit_text(text)
+    await callback.message.edit_text(T(callback.from_user.id, "language_changed"))
     await callback.answer()
 
 
 # ============================================================
-# BACKGROUND TASKS (з покращенням)
+# BACKGROUND TASKS (улучшенные)
 # ============================================================
 
 async def send_daily_forecasts():
@@ -1552,43 +1791,50 @@ async def send_daily_forecasts():
     if not subscriptions:
         return
 
-    # Групуємо підписки за унікальними координатами, щоб зробити один запит на координати
+    # Групуємо за координатами та рибою, годинами, але зберігаємо назву водойми
     grouped = {}
     for row in subscriptions:
         key = (row["latitude"], row["longitude"], row["fish_type"], row["hour"])
         if key not in grouped:
-            grouped[key] = []
-        grouped[key].append(row["user_id"])
+            grouped[key] = {
+                "users": [],
+                "water_body": row["water_body"],
+                "region": row["region"],
+            }
+        grouped[key]["users"].append(row["user_id"])
 
-    # Для кожної групи робимо один запит і надсилаємо всім підписникам цієї групи
-    for (lat, lon, fish, hour), user_ids in grouped.items():
+    for (lat, lon, fish, hour), info in grouped.items():
         try:
-            body = {"name": "unknown", "lat": lat, "lon": lon}
-            result = await WeatherClient(lat, lon).evaluate(fish, hour, 0)
+            # Назва водойми для всіх однакова, беремо першу
+            body = {"name": info["water_body"], "lat": lat, "lon": lon}
+            # Передаємо user_id для локалізації (візьмемо першого з списку)
+            sample_user = info["users"][0]
+            result = await WeatherClient(lat, lon).evaluate(fish, hour, 0, sample_user)
             if not result:
                 continue
 
+            # Формуємо локалізований текст
+            lang = get_user_lang(sample_user)
+            stars = "⭐" * result["stars"] + "☆" * (5 - result["stars"])
             text = (
-                f"🌅 <b>Ежедневный прогноз</b>\n\n"
-                f"🗺 {body['name']}\n"
-                f"🐟 {fish}\n"
+                f"🌅 <b>Щоденний прогноз</b>\n\n" if lang == "uk" else "🌅 <b>Ежедневный прогноз</b>\n\n"
+                f"{T(sample_user, 'body_label')} {body['name']}\n"
+                f"{T(sample_user, 'fish_label')} {fish}\n"
                 f"⏰ {hour:02d}:00\n"
-                f"⭐ {result['stars']}/5\n"
-                f"📊 {result['score_100']}/100\n"
-                f"🌡 {result['temperature']}°C\n"
-                f"💨 {result['wind_ms']} м/с\n"
-                f"🌀 {result['pressure_mm']} мм\n\n"
+                f"{T(sample_user, 'stars_label')} {result['stars']}/5 {stars}\n"
+                f"{T(sample_user, 'score_label')} {result['score_100']}/100\n"
+                f"{T(sample_user, 'temp_air')} {result['temperature']}°C\n"
+                f"{T(sample_user, 'wind')} {result['wind_ms']} м/с\n"
+                f"{T(sample_user, 'pressure')} {result['pressure_mm']} мм\n\n"
                 f"{result['expert_commentary']}"
             )
 
-            # Відправляємо всім користувачам у цій групі
-            for user_id in user_ids:
+            for user_id in info["users"]:
                 try:
                     await bot.send_message(user_id, text, parse_mode="HTML")
                 except Exception as e:
                     logging.warning("Не вдалося надіслати прогноз користувачу %s: %s", user_id, e)
 
-            # Додаємо випадкову затримку між групами, щоб не створювати пікове навантаження на API
             await asyncio.sleep(random.uniform(0.5, 2.0))
 
         except Exception as e:
@@ -1600,7 +1846,7 @@ async def check_extreme_weather():
     if not subscriptions:
         return
 
-    # Групуємо за координатами, щоб зробити один запит
+    # Групуємо за координатами
     grouped = {}
     for row in subscriptions:
         key = (row["latitude"], row["longitude"])
@@ -1619,20 +1865,30 @@ async def check_extreme_weather():
             if len(pressures) < 12:
                 continue
 
-            a = pressures[-12]
-            b = pressures[-1]
-            if a is None or b is None:
+            # Проверяем на None
+            if pressures[-12] is None or pressures[-1] is None:
                 continue
 
+            a = pressures[-12]
+            b = pressures[-1]
             delta = (b - a) * 0.75006
 
             if delta < -5:
-                alert_text = (
-                    f"⚠️ <b>Резкое падение давления</b>\n"
-                    f"🗺 {users[0][1]}\n"
-                    f"Изменение: {delta:.1f} мм рт.ст.\n"
-                    f"Клёв может стать нестабильным."
-                )
+                lang = get_user_lang(users[0][0])  # язык первого пользователя
+                if lang == "uk":
+                    alert_text = (
+                        f"⚠️ <b>Різке падіння тиску</b>\n"
+                        f"🗺 {users[0][1]}\n"
+                        f"Зміна: {delta:.1f} мм рт.ст.\n"
+                        f"Кльов може стати нестабільним."
+                    )
+                else:
+                    alert_text = (
+                        f"⚠️ <b>Резкое падение давления</b>\n"
+                        f"🗺 {users[0][1]}\n"
+                        f"Изменение: {delta:.1f} мм рт.ст.\n"
+                        f"Клёв может стать нестабильным."
+                    )
                 for user_id, _ in users:
                     try:
                         await bot.send_message(user_id, alert_text, parse_mode="HTML")
