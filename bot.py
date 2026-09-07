@@ -1,4 +1,4 @@
-import asyncio
+мimport asyncio
 import logging
 import os
 import sqlite3
@@ -14,7 +14,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardMarkup, KeyboardButton, Location
+    ReplyKeyboardMarkup, KeyboardButton, Location, BufferedInputFile
 )
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
 from aiohttp import web
@@ -232,7 +232,6 @@ def set_user_lang(user_id: int, lang: str):
     conn.close()
 
 def get_lang_dict(user_id: int) -> dict:
-    """Повертає словник з текстами для обраної мови користувача."""
     lang = get_user_lang(user_id)
     return LANGUAGES.get(lang, LANGUAGES["uk"])
 
@@ -792,11 +791,18 @@ def get_fish_keyboard():
         resize_keyboard=True,
     )
 
+# ВИПРАВЛЕНО: правильне створення клавіатури з рядками по 4 кнопки
 def get_hour_keyboard():
-    kb = InlineKeyboardMarkup(row_width=4)
-    buttons = [InlineKeyboardButton(text=str(i), callback_data=f"hour_{i}") for i in range(0, 24)]
-    kb.add(*buttons)
-    kb.add(InlineKeyboardButton(text="◀️ Назад (до дня)", callback_data="back_to_day"))
+    kb = InlineKeyboardMarkup(inline_keyboard=[])
+    row = []
+    for i in range(24):
+        row.append(InlineKeyboardButton(text=str(i), callback_data=f"hour_{i}"))
+        if len(row) == 4:
+            kb.inline_keyboard.append(row)
+            row = []
+    if row:
+        kb.inline_keyboard.append(row)
+    kb.inline_keyboard.append([InlineKeyboardButton(text="◀️ Назад (до дня)", callback_data="back_to_day")])
     return kb
 
 def get_language_keyboard():
@@ -810,7 +816,6 @@ bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# ------ СТАРТ ------
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     _ = get_lang_dict(message.from_user.id)
@@ -822,14 +827,12 @@ async def cmd_start(message: Message, state: FSMContext):
         parse_mode="HTML",
     )
 
-# ------ ДОПОМОГА ------
 @dp.message(Command("help"))
 @dp.message(F.text == "ℹ️ Допомога")
 async def cmd_help(message: Message):
     _ = get_lang_dict(message.from_user.id)
     await message.answer(_["help"], parse_mode="HTML")
 
-# ------ ІСТОРІЯ ------
 @dp.message(F.text == "📜 Моя історія")
 async def show_history(message: Message):
     _ = get_lang_dict(message.from_user.id)
@@ -845,12 +848,10 @@ async def show_history(message: Message):
         text += f"📍 {region} | 🎣 {fish}\n{day} о {hour_str}\n{graphic}\n🕒 {ts}\n\n"
     await message.answer(text, parse_mode="HTML")
 
-# ------ ГОЛОВНЕ МЕНЮ ------
 @dp.message(F.text == "🏠 Головне меню")
 async def main_menu(message: Message, state: FSMContext):
-    await cmd_start(message, state)  # викликаємо старт, де вже є get_lang_dict
+    await cmd_start(message, state)
 
-# ------ ГЕОЛОКАЦІЯ ------
 @dp.message(F.text == "📍 Моє місце")
 async def ask_location(message: Message, state: FSMContext):
     _ = get_lang_dict(message.from_user.id)
@@ -884,7 +885,6 @@ async def handle_location(message: Message, state: FSMContext):
         parse_mode="HTML",
     )
 
-# ------ ВИБІР ОБЛАСТІ ------
 @dp.message(F.text.in_(REGIONS.keys()))
 async def handle_region(message: Message, state: FSMContext):
     _ = get_lang_dict(message.from_user.id)
@@ -898,9 +898,8 @@ async def handle_region(message: Message, state: FSMContext):
 
 @dp.message(F.text == "◀️ Змінити область")
 async def change_region(message: Message, state: FSMContext):
-    await cmd_start(message, state)  # викликаємо старт
+    await cmd_start(message, state)
 
-# ------ ВИБІР РИБИ ------
 @dp.message(F.text.in_(FISH_LIST))
 async def handle_fish(message: Message, state: FSMContext):
     _ = get_lang_dict(message.from_user.id)
@@ -938,7 +937,6 @@ async def handle_back_to_fish(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("Оберіть рибу за допомогою кнопок нижче 👇")
     await callback.answer()
 
-# ------ ВИБІР ДНЯ ТА ГОДИНИ ------
 @dp.callback_query(F.data == "manual_hour")
 async def manual_hour_start(callback: CallbackQuery, state: FSMContext):
     _ = get_lang_dict(callback.from_user.id)
@@ -1070,15 +1068,16 @@ async def handle_hour(callback: CallbackQuery, state: FSMContext):
         ],
     ])
 
+    # ВИПРАВЛЕНО: використання BufferedInputFile для передачі байтів
     if image_data:
-        await callback.message.answer_photo(photo=image_data, caption=response, reply_markup=kb, parse_mode="HTML")
+        photo_file = BufferedInputFile(image_data, filename="forecast.png")
+        await callback.message.answer_photo(photo=photo_file, caption=response, reply_markup=kb, parse_mode="HTML")
     else:
         await callback.message.answer(response, reply_markup=kb, parse_mode="HTML")
 
     await state.clear()
     await callback.answer()
 
-# ------ ВІДГУКИ ТА ПОШИРЕННЯ ------
 @dp.callback_query(F.data.startswith("fb_"))
 async def handle_feedback(callback: CallbackQuery):
     _ = get_lang_dict(callback.from_user.id)
