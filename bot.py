@@ -38,8 +38,10 @@ GROUP_URL = os.getenv("GROUP_URL", "https://t.me/+rKxYkNg85aAwNzFi")
 DB_FILE = os.getenv("DB_FILE", "fishing_forecast.db")
 PORT = int(os.getenv("PORT", "10000"))
 
-CACHE_TTL = 4 * 60 * 60          # 4 години
-RATE_LIMIT_COOLDOWN = 10 * 60     # 10 хвилин
+WEATHERAPI_KEY = os.getenv("WEATHERAPI_KEY", "")  # опционально
+
+CACHE_TTL = 8 * 60 * 60          # 8 часов, чтобы реже обращаться к API
+RATE_LIMIT_COOLDOWN = 15 * 60     # 15 минут ожидания после 429
 HTTP_TIMEOUT = 20
 MAX_RETRIES = 2
 
@@ -113,14 +115,13 @@ LANG = {
             "• вітер, напрямок, хмарність та опади;\n"
             "• час доби та місячна фаза;\n"
             "• окремі коефіцієнти для хижака і мирної риби.\n\n"
-            "Дані погоди: Open-Meteo.\n"
-            "Кеш погоди: 4 години, щоб зменшити навантаження на API."
+            "Дані погоди: Open-Meteo (основний), WeatherAPI (резервний).\n"
+            "Кеш погоди: 8 годин, щоб зменшити навантаження на API."
         ),
         "processing": "⏳ Аналізую погоду саме для обраної водойми...",
         "rate": (
-            "❌ Open-Meteo тимчасово обмежив запити.\n"
-            "Старий кеш буде використаний автоматично, якщо він є.\n"
-            "Спробуйте трохи пізніше."
+            "❌ Open-Meteo тимчасово обмежив запити, але ми спробуємо резервне джерело.\n"
+            "Якщо дані є в кеші — вони будуть використані."
         ),
         "history_empty": "У вас поки немає збережених прогнозів.",
         "subscribe_done": "✅ Підписку збережено.",
@@ -142,7 +143,7 @@ LANG = {
         "moon": "🌙",
         "comfort": "🌤 Комфорт:",
         "recommendations": "💡 <b>Рекомендації:</b>",
-        "footer": "📦 <i>Погода: Open-Meteo. Координати — вибрана водойма.</i>",
+        "footer": "📦 <i>Погода: Open-Meteo / WeatherAPI. Координати — вибрана водойма.</i>",
         "grade_excellent": "🟢 Відмінно",
         "grade_good": "🟡 Добре",
         "grade_medium": "🟠 Середньо",
@@ -215,14 +216,13 @@ LANG = {
             "• ветер, направление, облачность и осадки;\n"
             "• время суток и фаза Луны;\n"
             "• отдельные коэффициенты для хищника и мирной рыбы.\n\n"
-            "Источник погоды: Open-Meteo.\n"
-            "Кэш погоды: 4 часа, чтобы снизить нагрузку на API."
+            "Источник погоды: Open-Meteo (основной), WeatherAPI (резервный).\n"
+            "Кэш погоды: 8 часов, чтобы снизить нагрузку на API."
         ),
         "processing": "⏳ Анализирую погоду именно для выбранного водоёма...",
         "rate": (
-            "❌ Open-Meteo временно ограничил запросы.\n"
-            "Если есть старый кэш — он будет использован автоматически.\n"
-            "Попробуйте немного позже."
+            "❌ Open-Meteo временно ограничил запросы, но мы попробуем резервный источник.\n"
+            "Если данные есть в кэше — они будут использованы."
         ),
         "history_empty": "У вас пока нет сохранённых прогнозов.",
         "subscribe_done": "✅ Подписка сохранена.",
@@ -244,7 +244,7 @@ LANG = {
         "moon": "🌙",
         "comfort": "🌤 Комфорт:",
         "recommendations": "💡 <b>Рекомендации:</b>",
-        "footer": "📦 <i>Погода: Open-Meteo. Координаты — выбранный водоём.</i>",
+        "footer": "📦 <i>Погода: Open-Meteo / WeatherAPI. Координаты — выбранный водоём.</i>",
         "grade_excellent": "🟢 Отлично",
         "grade_good": "🟡 Хорошо",
         "grade_medium": "🟠 Средне",
@@ -263,7 +263,7 @@ LANG = {
         "strong_wind": "💨 Сильный ветер: {wind} м/с ({dir}).",
         "precip_short": "🌧 Осадки: {precip} мм.",
         "cloud_short": "☁️ Облачность: {cloud}%.",
-        "sunrise": "🌅 Светание",
+        "sunrise": "🌅 Рассвет",
         "sunset": "🌇 Закат",
         "night": "🌙 Ночь",
         "day": "☀️ День",
@@ -381,7 +381,7 @@ def init_db():
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # Міграція
+    # Миграции
     existing = {row["name"] for row in cur.execute("PRAGMA table_info(forecasts)")}
     for name, sql in {
         "water_body": "ALTER TABLE forecasts ADD COLUMN water_body TEXT",
@@ -638,11 +638,83 @@ def bait(fish, water_temp, wind):
 
 
 # ============================================================
-# OPEN-METEO (з покращеннями)
+# WEATHER CLIENTS (Open-Meteo + WeatherAPI fallback)
 # ============================================================
 
 weather_cache = {}
 rate_limit_until = 0.0
+
+
+class WeatherAPIClient:
+    """Резервный клиент для WeatherAPI (требуется API ключ)"""
+    def __init__(self, lat, lon):
+        self.lat = round(float(lat), 5)
+        self.lon = round(float(lon), 5)
+        self.cache_key = f"wa_{self.lat}:{self.lon}"
+
+    async def get_forecast(self):
+        if not WEATHERAPI_KEY:
+            return None
+        now = time.time()
+        cached = weather_cache.get(self.cache_key)
+        if cached and now - cached["timestamp"] < CACHE_TTL:
+            return cached["data"]
+
+        url = "http://api.weatherapi.com/v1/forecast.json"
+        params = {
+            "key": WEATHERAPI_KEY,
+            "q": f"{self.lat},{self.lon}",
+            "days": 4,
+            "aqi": "no",
+            "alerts": "no"
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params, timeout=HTTP_TIMEOUT) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        # Преобразуем в формат, похожий на Open-Meteo
+                        converted = self._convert_wa_to_om(data)
+                        weather_cache[self.cache_key] = {
+                            "timestamp": now,
+                            "data": converted
+                        }
+                        return converted
+                    else:
+                        logging.warning("WeatherAPI HTTP %s", resp.status)
+        except Exception as e:
+            logging.warning("WeatherAPI error: %s", e)
+        return None
+
+    def _convert_wa_to_om(self, wa_data):
+        """Преобразует ответ WeatherAPI в структуру, похожую на Open-Meteo"""
+        hourly = {
+            "time": [],
+            "temperature_2m": [],
+            "surface_pressure": [],
+            "wind_speed_10m": [],
+            "wind_direction_10m": [],
+            "cloud_cover": [],
+            "precipitation": [],
+            "relative_humidity_2m": []
+        }
+        for day in wa_data.get("forecast", {}).get("forecastday", []):
+            date = day["date"]
+            for hour_data in day.get("hour", []):
+                # Время в формате "2026-09-07T17:00"
+                dt_str = f"{date}T{hour_data['time']}"  # hour_data['time'] = "17:00"
+                hourly["time"].append(dt_str)
+                hourly["temperature_2m"].append(hour_data.get("temp_c", 18))
+                # Давление в мбар (гПа) -> гПа
+                hourly["surface_pressure"].append(hour_data.get("pressure_mb", 1013.25))
+                # Ветер: км/ч -> м/с
+                wind_kph = hour_data.get("wind_kph", 0)
+                hourly["wind_speed_10m"].append(wind_kph / 3.6)
+                hourly["wind_direction_10m"].append(hour_data.get("wind_degree", 0))
+                hourly["cloud_cover"].append(hour_data.get("cloud", 40))
+                hourly["precipitation"].append(hour_data.get("precip_mm", 0))
+                hourly["relative_humidity_2m"].append(hour_data.get("humidity", 55))
+        return {"hourly": hourly}
 
 
 class WeatherClient:
@@ -673,7 +745,7 @@ class WeatherClient:
             "wind_speed_unit": "ms",
         }
         if model:
-            # В Open-Meteo параметр называется "models" и принимает массив
+            # Open-Meteo ожидает параметр "models" как массив
             params["models"] = [model]
 
         url = "https://api.open-meteo.com/v1/forecast"
@@ -703,15 +775,19 @@ class WeatherClient:
         if cached and now - cached["timestamp"] < CACHE_TTL:
             return cached["data"]
 
+        # Если Open-Meteo в cooldown, пробуем WeatherAPI
         if now < rate_limit_until:
+            wa = WeatherAPIClient(self.lat, self.lon)
+            wa_data = await wa.get_forecast()
+            if wa_data:
+                return wa_data
             return cached["data"] if cached else None
 
+        # Пробуем Open-Meteo
         async with aiohttp.ClientSession() as session:
-            # Спочатку пробуємо GFS (за замовчуванням)
             data = await self.fetch(session, model=None)
-            # Якщо не вдалося або 429, спробуємо ECMWF
-            if not data and now >= rate_limit_until:
-                logging.info("Спроба отримати дані через модель ECMWF")
+            if not data:
+                # Если не удалось, пробуем ECMWF
                 data = await self.fetch(session, model="ecmwf_ifs04")
 
         if data:
@@ -720,6 +796,12 @@ class WeatherClient:
                 "data": data,
             }
             return data
+
+        # Если Open-Meteo не дал результат, пробуем WeatherAPI
+        wa = WeatherAPIClient(self.lat, self.lon)
+        wa_data = await wa.get_forecast()
+        if wa_data:
+            return wa_data
 
         return cached["data"] if cached else None
 
@@ -925,7 +1007,6 @@ class WeatherClient:
 
         commentary = []
 
-        # Локализованные подсказки
         if lang == "uk":
             commentary.append(f"⏱ <b>{sun_title}:</b> {sun_desc}.")
             commentary.append(f"🌀 <b>Тиск:</b> {pressure_mm:.1f} мм | {trend_text} | {stability_text}")
@@ -1040,7 +1121,6 @@ def _load_fonts():
             return font, bold_f, small
         except Exception:
             continue
-    # Если шрифты не найдены, используем дефолтный (может не поддерживать кириллицу)
     default = ImageFont.load_default()
     return default, default, default
 
@@ -1058,7 +1138,6 @@ def make_image(result, region, body_name, fish, user_id):
         stars = "⭐" * result["stars"] + "☆" * (5 - result["stars"])
         draw.text((30, 150), f"Оценка: {result['stars']}/5 {stars}  ({result['score_100']}/100)", font=bold, fill=(180, 100, 0))
 
-        # Используем локализованные подписи
         lang = get_user_lang(user_id)
         if lang == "uk":
             rows = [
@@ -1107,7 +1186,7 @@ def make_image(result, region, body_name, fish, user_id):
 
 
 # ============================================================
-# KEYBOARDS (без изменений)
+# KEYBOARDS
 # ============================================================
 
 def regions_keyboard():
@@ -1472,7 +1551,6 @@ async def run_forecast(message: Message, state: FSMContext, hour: int, callback_
     else:
         grade = T(user_id, "grade_bad")
 
-    # Формируем текст прогноза с локализацией
     text = (
         f"{T(user_id, 'forecast_header')}\n\n"
         f"{T(user_id, 'body_label')} {body['name']}\n"
@@ -1783,7 +1861,7 @@ async def language_set(callback: CallbackQuery, state: FSMContext):
 
 
 # ============================================================
-# BACKGROUND TASKS (улучшенные)
+# BACKGROUND TASKS
 # ============================================================
 
 async def send_daily_forecasts():
@@ -1791,7 +1869,6 @@ async def send_daily_forecasts():
     if not subscriptions:
         return
 
-    # Групуємо за координатами та рибою, годинами, але зберігаємо назву водойми
     grouped = {}
     for row in subscriptions:
         key = (row["latitude"], row["longitude"], row["fish_type"], row["hour"])
@@ -1805,15 +1882,12 @@ async def send_daily_forecasts():
 
     for (lat, lon, fish, hour), info in grouped.items():
         try:
-            # Назва водойми для всіх однакова, беремо першу
             body = {"name": info["water_body"], "lat": lat, "lon": lon}
-            # Передаємо user_id для локалізації (візьмемо першого з списку)
             sample_user = info["users"][0]
             result = await WeatherClient(lat, lon).evaluate(fish, hour, 0, sample_user)
             if not result:
                 continue
 
-            # Формуємо локалізований текст
             lang = get_user_lang(sample_user)
             stars = "⭐" * result["stars"] + "☆" * (5 - result["stars"])
             text = (
@@ -1835,7 +1909,7 @@ async def send_daily_forecasts():
                 except Exception as e:
                     logging.warning("Не вдалося надіслати прогноз користувачу %s: %s", user_id, e)
 
-            await asyncio.sleep(random.uniform(0.5, 2.0))
+            await asyncio.sleep(random.uniform(1.0, 3.0))  # увеличенная задержка
 
         except Exception as e:
             logging.exception("Помилка в send_daily_forecasts для групи %s: %s", (lat, lon), e)
@@ -1846,7 +1920,6 @@ async def check_extreme_weather():
     if not subscriptions:
         return
 
-    # Групуємо за координатами
     grouped = {}
     for row in subscriptions:
         key = (row["latitude"], row["longitude"])
@@ -1865,7 +1938,6 @@ async def check_extreme_weather():
             if len(pressures) < 12:
                 continue
 
-            # Проверяем на None
             if pressures[-12] is None or pressures[-1] is None:
                 continue
 
@@ -1874,7 +1946,7 @@ async def check_extreme_weather():
             delta = (b - a) * 0.75006
 
             if delta < -5:
-                lang = get_user_lang(users[0][0])  # язык первого пользователя
+                lang = get_user_lang(users[0][0])
                 if lang == "uk":
                     alert_text = (
                         f"⚠️ <b>Різке падіння тиску</b>\n"
@@ -1895,7 +1967,7 @@ async def check_extreme_weather():
                     except Exception as e:
                         logging.warning("Не вдалося надіслати попередження користувачу %s: %s", user_id, e)
 
-            await asyncio.sleep(random.uniform(0.5, 1.5))
+            await asyncio.sleep(random.uniform(1.0, 2.0))
 
         except Exception as e:
             logging.exception("Помилка check_extreme_weather для координат %s: %s", (lat, lon), e)
@@ -1959,8 +2031,12 @@ async def main():
 
     logging.info("Start polling")
     logging.info("Water-body coordinates are used for weather requests")
-    logging.info("Open-Meteo cache TTL: %s seconds (4 hours)", CACHE_TTL)
+    logging.info("Cache TTL: %s seconds (8 hours)", CACHE_TTL)
     logging.info("Wind speed unit forced to m/s")
+    if WEATHERAPI_KEY:
+        logging.info("WeatherAPI fallback enabled")
+    else:
+        logging.info("WeatherAPI fallback disabled (no API key)")
 
     try:
         await dp.start_polling(bot)
