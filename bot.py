@@ -38,10 +38,10 @@ GROUP_URL = os.getenv("GROUP_URL", "https://t.me/+rKxYkNg85aAwNzFi")
 DB_FILE = os.getenv("DB_FILE", "fishing_forecast.db")
 PORT = int(os.getenv("PORT", "10000"))
 
-WEATHERAPI_KEY = os.getenv("WEATHERAPI_KEY", "")  # опционально
+WEATHERAPI_KEY = os.getenv("WEATHERAPI_KEY", "")
 
-CACHE_TTL = 8 * 60 * 60          # 8 часов, чтобы реже обращаться к API
-RATE_LIMIT_COOLDOWN = 15 * 60     # 15 минут ожидания после 429
+CACHE_TTL = 12 * 60 * 60          # 12 часов (было 8)
+RATE_LIMIT_COOLDOWN = 15 * 60     # 15 минут
 HTTP_TIMEOUT = 20
 MAX_RETRIES = 2
 
@@ -116,7 +116,7 @@ LANG = {
             "• час доби та місячна фаза;\n"
             "• окремі коефіцієнти для хижака і мирної риби.\n\n"
             "Дані погоди: Open-Meteo (основний), WeatherAPI (резервний).\n"
-            "Кеш погоди: 8 годин, щоб зменшити навантаження на API."
+            "Кеш погоди: 12 годин, щоб зменшити навантаження на API."
         ),
         "processing": "⏳ Аналізую погоду саме для обраної водойми...",
         "rate": (
@@ -217,7 +217,7 @@ LANG = {
             "• время суток и фаза Луны;\n"
             "• отдельные коэффициенты для хищника и мирной рыбы.\n\n"
             "Источник погоды: Open-Meteo (основной), WeatherAPI (резервный).\n"
-            "Кэш погоды: 8 часов, чтобы снизить нагрузку на API."
+            "Кэш погоды: 12 часов, чтобы снизить нагрузку на API."
         ),
         "processing": "⏳ Анализирую погоду именно для выбранного водоёма...",
         "rate": (
@@ -654,10 +654,12 @@ class WeatherAPIClient:
 
     async def get_forecast(self):
         if not WEATHERAPI_KEY:
+            logging.debug("WeatherAPI ключ не задан, пропускаем")
             return None
         now = time.time()
         cached = weather_cache.get(self.cache_key)
         if cached and now - cached["timestamp"] < CACHE_TTL:
+            logging.info("WeatherAPI: используем кеш для %s,%s", self.lat, self.lon)
             return cached["data"]
 
         url = "http://api.weatherapi.com/v1/forecast.json"
@@ -673,12 +675,12 @@ class WeatherAPIClient:
                 async with session.get(url, params=params, timeout=HTTP_TIMEOUT) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        # Преобразуем в формат, похожий на Open-Meteo
                         converted = self._convert_wa_to_om(data)
                         weather_cache[self.cache_key] = {
                             "timestamp": now,
                             "data": converted
                         }
+                        logging.info("WeatherAPI: успешно получены данные для %s,%s", self.lat, self.lon)
                         return converted
                     else:
                         logging.warning("WeatherAPI HTTP %s", resp.status)
@@ -701,13 +703,10 @@ class WeatherAPIClient:
         for day in wa_data.get("forecast", {}).get("forecastday", []):
             date = day["date"]
             for hour_data in day.get("hour", []):
-                # Время в формате "2026-09-07T17:00"
-                dt_str = f"{date}T{hour_data['time']}"  # hour_data['time'] = "17:00"
+                dt_str = f"{date}T{hour_data['time']}"
                 hourly["time"].append(dt_str)
                 hourly["temperature_2m"].append(hour_data.get("temp_c", 18))
-                # Давление в мбар (гПа) -> гПа
                 hourly["surface_pressure"].append(hour_data.get("pressure_mb", 1013.25))
-                # Ветер: км/ч -> м/с
                 wind_kph = hour_data.get("wind_kph", 0)
                 hourly["wind_speed_10m"].append(wind_kph / 3.6)
                 hourly["wind_direction_10m"].append(hour_data.get("wind_degree", 0))
@@ -745,7 +744,6 @@ class WeatherClient:
             "wind_speed_unit": "ms",
         }
         if model:
-            # Open-Meteo ожидает параметр "models" как массив
             params["models"] = [model]
 
         url = "https://api.open-meteo.com/v1/forecast"
@@ -773,21 +771,27 @@ class WeatherClient:
 
         cached = weather_cache.get(self.cache_key)
         if cached and now - cached["timestamp"] < CACHE_TTL:
+            logging.debug("Open-Meteo: используем кеш для %s,%s", self.lat, self.lon)
             return cached["data"]
 
         # Если Open-Meteo в cooldown, пробуем WeatherAPI
         if now < rate_limit_until:
+            logging.info("Open-Meteo в cooldown, пробуем WeatherAPI для %s,%s", self.lat, self.lon)
             wa = WeatherAPIClient(self.lat, self.lon)
             wa_data = await wa.get_forecast()
             if wa_data:
                 return wa_data
-            return cached["data"] if cached else None
+            # Если WeatherAPI не дал данных, возвращаем кеш (даже устаревший)
+            if cached:
+                logging.warning("Используем устаревший кеш для %s,%s", self.lat, self.lon)
+                return cached["data"]
+            return None
 
         # Пробуем Open-Meteo
         async with aiohttp.ClientSession() as session:
             data = await self.fetch(session, model=None)
             if not data:
-                # Если не удалось, пробуем ECMWF
+                # Пробуем ECMWF
                 data = await self.fetch(session, model="ecmwf_ifs04")
 
         if data:
@@ -798,13 +802,19 @@ class WeatherClient:
             return data
 
         # Если Open-Meteo не дал результат, пробуем WeatherAPI
+        logging.info("Open-Meteo не ответил, пробуем WeatherAPI для %s,%s", self.lat, self.lon)
         wa = WeatherAPIClient(self.lat, self.lon)
         wa_data = await wa.get_forecast()
         if wa_data:
             return wa_data
 
-        return cached["data"] if cached else None
+        # Последняя надежда – кеш (даже устаревший)
+        if cached:
+            logging.warning("Используем устаревший кеш для %s,%s", self.lat, self.lon)
+            return cached["data"]
+        return None
 
+    # Остальные методы (pressure_score, pressure_trend, etc.) без изменений
     @staticmethod
     def pressure_score(mm, predator):
         optimum = 748 if predator else 752
@@ -1186,7 +1196,7 @@ def make_image(result, region, body_name, fish, user_id):
 
 
 # ============================================================
-# KEYBOARDS
+# KEYBOARDS (без изменений)
 # ============================================================
 
 def regions_keyboard():
@@ -1909,7 +1919,7 @@ async def send_daily_forecasts():
                 except Exception as e:
                     logging.warning("Не вдалося надіслати прогноз користувачу %s: %s", user_id, e)
 
-            await asyncio.sleep(random.uniform(1.0, 3.0))  # увеличенная задержка
+            await asyncio.sleep(random.uniform(1.0, 3.0))
 
         except Exception as e:
             logging.exception("Помилка в send_daily_forecasts для групи %s: %s", (lat, lon), e)
@@ -2001,6 +2011,11 @@ async def main():
         format="%(asctime)s | %(levelname)s | %(message)s",
     )
 
+    if not WEATHERAPI_KEY:
+        logging.warning("⚠️ WEATHERAPI_KEY не задан – резервный источник не будет работать.")
+    else:
+        logging.info("✅ WeatherAPI резерв включён.")
+
     init_db()
 
     app = web.Application()
@@ -2030,13 +2045,8 @@ async def main():
     scheduler.start()
 
     logging.info("Start polling")
-    logging.info("Water-body coordinates are used for weather requests")
-    logging.info("Cache TTL: %s seconds (8 hours)", CACHE_TTL)
+    logging.info("Cache TTL: %s seconds (12 hours)", CACHE_TTL)
     logging.info("Wind speed unit forced to m/s")
-    if WEATHERAPI_KEY:
-        logging.info("WeatherAPI fallback enabled")
-    else:
-        logging.info("WeatherAPI fallback disabled (no API key)")
 
     try:
         await dp.start_polling(bot)
