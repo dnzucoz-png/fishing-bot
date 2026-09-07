@@ -5,8 +5,9 @@ import math
 import os
 import sqlite3
 import time
+import random
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Dict, List
 
 import aiohttp
 from aiohttp import web
@@ -38,11 +39,12 @@ GROUP_URL = os.getenv("GROUP_URL", "https://t.me/+rKxYkNg85aAwNzFi")
 DB_FILE = os.getenv("DB_FILE", "fishing_forecast.db")
 PORT = int(os.getenv("PORT", "10000"))
 
-CACHE_TTL = 2 * 60 * 60
-RATE_LIMIT_COOLDOWN = 10 * 60
+CACHE_TTL = 4 * 60 * 60          # 4 години, щоб рідше звертатися до API
+RATE_LIMIT_COOLDOWN = 10 * 60     # 10 хвилин очікування після 429
 HTTP_TIMEOUT = 20
+MAX_RETRIES = 2
 
-# Области используются только как fallback/география.
+# Области використовуються тільки як fallback/географія.
 REGIONS = {
     "Дніпропетровська": {"lat": 48.4647, "lon": 35.0462},
     "Київська": {"lat": 50.4501, "lon": 30.5234},
@@ -53,30 +55,10 @@ REGIONS = {
 
 WATER_BODIES = {
     "Дніпропетровська": [
-        {
-            "name": "Кам'янське водосховище",
-            "lat": 48.81421,
-            "lon": 34.09400,
-            "description": "район Кам'янського водосховища",
-        },
-        {
-            "name": "Дніпро",
-            "lat": 48.51716,
-            "lon": 34.60617,
-            "description": "акваторія Дніпра в межах Кам'янського",
-        },
-        {
-            "name": "Самарська затока",
-            "lat": 48.60000,
-            "lon": 35.20000,
-            "description": "Самарська затока",
-        },
-        {
-            "name": "Каховське водосховище",
-            "lat": 47.56200,
-            "lon": 34.89900,
-            "description": "історична акваторія; координати не є Кам'янським водосховищем",
-        },
+        {"name": "Кам'янське водосховище", "lat": 48.81421, "lon": 34.09400, "description": "район Кам'янського водосховища"},
+        {"name": "Дніпро", "lat": 48.51716, "lon": 34.60617, "description": "акваторія Дніпра в межах Кам'янського"},
+        {"name": "Самарська затока", "lat": 48.60000, "lon": 35.20000, "description": "Самарська затока"},
+        {"name": "Каховське водосховище", "lat": 47.56200, "lon": 34.89900, "description": "історична акваторія"},
     ],
     "Київська": [
         {"name": "Київське водосховище", "lat": 50.8000, "lon": 30.5000, "description": ""},
@@ -134,7 +116,7 @@ LANG = {
             "• час доби та місячна фаза;\n"
             "• окремі коефіцієнти для хижака і мирної риби.\n\n"
             "Дані погоди: Open-Meteo.\n"
-            "Кеш погоди: 2 години, щоб не ловити 429."
+            "Кеш погоди: 4 години, щоб зменшити навантаження на API."
         ),
         "processing": "⏳ Аналізую погоду саме для обраної водойми...",
         "rate": (
@@ -161,7 +143,7 @@ LANG = {
             "• время суток и фаза Луны;\n"
             "• отдельные коэффициенты для хищника и мирной рыбы.\n\n"
             "Источник погоды: Open-Meteo.\n"
-            "Кэш погоды: 2 часа, чтобы не получать 429."
+            "Кэш погоды: 4 часа, чтобы снизить нагрузку на API."
         ),
         "processing": "⏳ Анализирую погоду именно для выбранного водоёма...",
         "rate": (
@@ -193,7 +175,6 @@ def db():
 def init_db():
     conn = db()
     cur = conn.cursor()
-
     cur.execute("""
         CREATE TABLE IF NOT EXISTS forecasts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -212,7 +193,6 @@ def init_db():
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
-
     cur.execute("""
         CREATE TABLE IF NOT EXISTS feedback (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -222,7 +202,6 @@ def init_db():
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
-
     cur.execute("""
         CREATE TABLE IF NOT EXISTS subscriptions (
             user_id INTEGER PRIMARY KEY,
@@ -235,14 +214,12 @@ def init_db():
             enabled INTEGER DEFAULT 1
         )
     """)
-
     cur.execute("""
         CREATE TABLE IF NOT EXISTS user_language (
             user_id INTEGER PRIMARY KEY,
             lang TEXT DEFAULT 'uk'
         )
     """)
-
     cur.execute("""
         CREATE TABLE IF NOT EXISTS user_fish_catches (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -256,8 +233,7 @@ def init_db():
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
-
-    # Миграция старой базы.
+    # Міграція
     existing = {row["name"] for row in cur.execute("PRAGMA table_info(forecasts)")}
     for name, sql in {
         "water_body": "ALTER TABLE forecasts ADD COLUMN water_body TEXT",
@@ -269,7 +245,6 @@ def init_db():
                 cur.execute(sql)
             except sqlite3.OperationalError:
                 pass
-
     existing = {row["name"] for row in cur.execute("PRAGMA table_info(subscriptions)")}
     for name, sql in {
         "water_body": "ALTER TABLE subscriptions ADD COLUMN water_body TEXT",
@@ -281,26 +256,20 @@ def init_db():
                 cur.execute(sql)
             except sqlite3.OperationalError:
                 pass
-
     conn.commit()
     conn.close()
 
 
 def get_user_lang(user_id: int) -> str:
     conn = db()
-    row = conn.execute(
-        "SELECT lang FROM user_language WHERE user_id=?", (user_id,)
-    ).fetchone()
+    row = conn.execute("SELECT lang FROM user_language WHERE user_id=?", (user_id,)).fetchone()
     conn.close()
     return row["lang"] if row else "uk"
 
 
 def set_user_lang(user_id: int, lang: str):
     conn = db()
-    conn.execute(
-        "INSERT OR REPLACE INTO user_language(user_id,lang) VALUES(?,?)",
-        (user_id, lang),
-    )
+    conn.execute("INSERT OR REPLACE INTO user_language(user_id,lang) VALUES(?,?)", (user_id, lang))
     conn.commit()
     conn.close()
 
@@ -326,10 +295,7 @@ def save_forecast(user_id, region, body, fish, result):
 
 def save_feedback(user_id, forecast_id, rating):
     conn = db()
-    conn.execute(
-        "INSERT INTO feedback(user_id,forecast_id,rating) VALUES(?,?,?)",
-        (user_id, forecast_id, rating),
-    )
+    conn.execute("INSERT INTO feedback(user_id,forecast_id,rating) VALUES(?,?,?)", (user_id, forecast_id, rating))
     conn.commit()
     conn.close()
 
@@ -352,9 +318,7 @@ def save_subscription(user_id, region, body, fish, hour):
         INSERT OR REPLACE INTO subscriptions
         (user_id, region, water_body, latitude, longitude, fish_type, hour, enabled)
         VALUES (?, ?, ?, ?, ?, ?, ?, 1)
-    """, (
-        user_id, region, body["name"], body["lat"], body["lon"], fish, hour
-    ))
+    """, (user_id, region, body["name"], body["lat"], body["lon"], fish, hour))
     conn.commit()
     conn.close()
 
@@ -375,10 +339,7 @@ def save_catch(user_id, fish, weight, length, location, photo_id):
         INSERT INTO user_fish_catches
         (user_id, fish_type, weight, length, location, photo_file_id, date)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (
-        user_id, fish, weight, length, location, photo_id,
-        datetime.now().date().isoformat()
-    ))
+    """, (user_id, fish, weight, length, location, photo_id, datetime.now().date().isoformat()))
     conn.commit()
     conn.close()
 
@@ -505,7 +466,7 @@ def bait(fish, water_temp, wind):
 
 
 # ============================================================
-# OPEN-METEO
+# OPEN-METEO (з покращеннями проти 429)
 # ============================================================
 
 weather_cache = {}
@@ -518,11 +479,12 @@ class WeatherClient:
         self.lon = round(float(lon), 5)
         self.cache_key = f"{self.lat}:{self.lon}"
 
-    async def fetch(self, session):
+    async def fetch(self, session, model=None):
         global rate_limit_until
 
         now = time.time()
         if now < rate_limit_until:
+            logging.warning("Open-Meteo cooldown активний, запит пропущено")
             return None
 
         params = {
@@ -538,33 +500,27 @@ class WeatherClient:
             "timezone": "auto",
             "wind_speed_unit": "ms",
         }
+        if model:
+            params["models"] = model
 
         url = "https://api.open-meteo.com/v1/forecast"
 
-        for attempt in range(2):
+        for attempt in range(MAX_RETRIES):
             try:
-                timeout = aiohttp.ClientTimeout(
-                    total=HTTP_TIMEOUT, connect=8
-                )
+                timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT, connect=8)
                 async with session.get(url, params=params, timeout=timeout) as r:
                     if r.status == 200:
                         return await r.json()
-
                     if r.status == 429:
                         rate_limit_until = time.time() + RATE_LIMIT_COOLDOWN
-                        logging.warning("Open-Meteo 429: включён cooldown")
+                        logging.warning("Open-Meteo 429: включён cooldown на %s с", RATE_LIMIT_COOLDOWN)
                         return None
-
-                    logging.warning("Open-Meteo HTTP %s", r.status)
-
+                    logging.warning("Open-Meteo HTTP %s, model=%s", r.status, model)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 logging.warning("Open-Meteo error: %s", e)
-
-            if attempt == 0:
-                await asyncio.sleep(1.5)
-
+            await asyncio.sleep(1.5 * (attempt + 1))
         return None
 
     async def get(self):
@@ -578,7 +534,12 @@ class WeatherClient:
             return cached["data"] if cached else None
 
         async with aiohttp.ClientSession() as session:
-            data = await self.fetch(session)
+            # Спочатку пробуємо GFS (за замовчуванням)
+            data = await self.fetch(session, model=None)
+            # Якщо не вдалося або 429, спробуємо ECMWF
+            if not data and now >= rate_limit_until:
+                logging.info("Спроба отримати дані через модель ECMWF")
+                data = await self.fetch(session, model="ecmwf_ifs04")
 
         if data:
             weather_cache[self.cache_key] = {
@@ -589,77 +550,52 @@ class WeatherClient:
 
         return cached["data"] if cached else None
 
+    # Решта методів (pressure_score, pressure_trend, pressure_stability, temp_score, wind_score, precip_score, cloud_score, star_score, nearest_hour_index, evaluate) залишаються без змін, тому я їх не переписую повністю, але в повному коді вони будуть.
+    # У цьому файлі я надам повний код з усіма методами.
     @staticmethod
     def pressure_score(mm, predator):
         optimum = 748 if predator else 752
         diff = abs(mm - optimum)
-        if diff <= 3:
-            return 14
-        if diff <= 6:
-            return 8
-        if diff <= 10:
-            return 0
-        if diff <= 15:
-            return -10
+        if diff <= 3: return 14
+        if diff <= 6: return 8
+        if diff <= 10: return 0
+        if diff <= 15: return -10
         return -18
 
     @staticmethod
     def pressure_trend(pressures, idx):
-        if idx < 24:
-            return "Н/Д", 0
-
+        if idx < 24: return "Н/Д", 0
         recent = [x for x in pressures[idx - 12:idx + 1] if x is not None]
         old = [x for x in pressures[idx - 24:idx - 12] if x is not None]
-        if len(recent) < 5 or len(old) < 5:
-            return "Н/Д", 0
-
+        if len(recent) < 5 or len(old) < 5: return "Н/Д", 0
         delta = (sum(recent) / len(recent) - sum(old) / len(old)) * 0.75006
-
-        if delta < -2.5:
-            return "📉 Сильно падает", 12
-        if delta < -0.8:
-            return "📉 Медленно падает", 8
-        if delta > 2.5:
-            return "📈 Сильно растёт", -6
-        if delta > 0.8:
-            return "📈 Медленно растёт", 2
+        if delta < -2.5: return "📉 Сильно падает", 12
+        if delta < -0.8: return "📉 Медленно падает", 8
+        if delta > 2.5: return "📈 Сильно растёт", -6
+        if delta > 0.8: return "📈 Медленно растёт", 2
         return "✅ Стабильный", 10
 
     @staticmethod
     def pressure_stability(pressures, idx):
-        if idx < 48:
-            return "Н/Д", 0
-
+        if idx < 48: return "Н/Д", 0
         values = [x for x in pressures[idx - 48:idx + 1] if x is not None]
-        if len(values) < 20:
-            return "Н/Д", 0
-
+        if len(values) < 20: return "Н/Д", 0
         spread = max(values) - min(values)
-        if spread <= 4:
-            return "✅ Очень стабильный", 12
-        if spread <= 7:
-            return "✅ Стабильный", 6
-        if spread <= 11:
-            return "⚠️ Меняется", -4
+        if spread <= 4: return "✅ Очень стабильный", 12
+        if spread <= 7: return "✅ Стабильный", 6
+        if spread <= 11: return "⚠️ Меняется", -4
         return "❌ Резко меняется", -16
 
     @staticmethod
     def temp_score(water, predator):
         if predator:
-            if 8 <= water <= 16:
-                return 12
-            if 5 <= water <= 20:
-                return 6
-            if water > 24 or water < 3:
-                return -10
+            if 8 <= water <= 16: return 12
+            if 5 <= water <= 20: return 6
+            if water > 24 or water < 3: return -10
             return 0
-
-        if 16 <= water <= 23:
-            return 12
-        if 12 <= water <= 26:
-            return 6
-        if water > 28 or water < 8:
-            return -8
+        if 16 <= water <= 23: return 12
+        if 12 <= water <= 26: return 6
+        if water > 28 or water < 8: return -8
         return 0
 
     @staticmethod
@@ -674,57 +610,41 @@ class WeatherClient:
             score = -22
         else:
             score = -8
-
         if direction in {"Пд", "Пд-Зх", "Зх", "Пд-Сх"}:
             score += 4
         elif direction in {"Пн", "Пн-Сх"}:
             score -= 3
-
         return score
 
     @staticmethod
     def precip_score(mm, predator):
-        if mm <= 0.1:
-            return 0
-        if mm <= 1.8:
-            return 7 if predator else 4
-        if mm <= 3.5:
-            return -6
+        if mm <= 0.1: return 0
+        if mm <= 1.8: return 7 if predator else 4
+        if mm <= 3.5: return -6
         return -16
 
     @staticmethod
     def cloud_score(cloud, predator):
         if predator:
-            if cloud >= 70:
-                return 9
-            if cloud >= 40:
-                return 4
+            if cloud >= 70: return 9
+            if cloud >= 40: return 4
             return -3
-
-        if cloud >= 80:
-            return 2
-        if cloud <= 30:
-            return 3
+        if cloud >= 80: return 2
+        if cloud <= 30: return 3
         return 0
 
     @staticmethod
     def star_score(score):
-        if score >= 84:
-            return 5
-        if score >= 68:
-            return 4
-        if score >= 50:
-            return 3
-        if score >= 32:
-            return 2
-        if score > 12:
-            return 1
+        if score >= 84: return 5
+        if score >= 68: return 4
+        if score >= 50: return 3
+        if score >= 32: return 2
+        if score > 12: return 1
         return 0
 
     @staticmethod
     def nearest_hour_index(times, target):
-        if not times:
-            return None
+        if not times: return None
         best_i = 0
         best_d = float("inf")
         for i, s in enumerate(times):
@@ -742,12 +662,10 @@ class WeatherClient:
         data = await self.get()
         if not data:
             return None
-
         h = data.get("hourly", {})
         times = h.get("time", [])
         if not times:
             return None
-
         target_date = datetime.now() + timedelta(days=day_offset)
         target = target_date.replace(hour=hour, minute=0, second=0, microsecond=0)
         idx = self.nearest_hour_index(times, target)
@@ -770,21 +688,13 @@ class WeatherClient:
         precip = float(val("precipitation", 0))
 
         direction = get_wind_direction(wind_deg)
-
         water_temp = round(max(0, min(30, temp * 0.82 + 3.2)), 1)
-
         predator = fish in PREDATORS
 
         score = 48
-        trend_text, trend_pts = self.pressure_trend(
-            h.get("surface_pressure", []), idx
-        )
-        stability_text, stability_pts = self.pressure_stability(
-            h.get("surface_pressure", []), idx
-        )
-
-        score += trend_pts
-        score += stability_pts
+        trend_text, trend_pts = self.pressure_trend(h.get("surface_pressure", []), idx)
+        stability_text, stability_pts = self.pressure_stability(h.get("surface_pressure", []), idx)
+        score += trend_pts + stability_pts
         score += self.pressure_score(pressure_mm, predator)
         score += self.temp_score(water_temp, predator)
         score += self.wind_score(wind, direction, predator)
@@ -793,10 +703,8 @@ class WeatherClient:
 
         sun_title, sun_desc, sun_pts = sun_activity(hour)
         score += sun_pts
-
         moon_text, moon_pts = moon_phase(target_date)
         score += moon_pts if predator else int(moon_pts * 0.5)
-
         score = max(0, min(100, int(score)))
         stars = self.star_score(score)
 
@@ -807,21 +715,18 @@ class WeatherClient:
             comfort += 10
         else:
             comfort -= 10
-
         if wind <= 5:
             comfort += 15
         elif wind <= 8:
             comfort += 5
         else:
             comfort -= 15
-
         if precip < 1:
             comfort += 15
         elif precip < 3:
             comfort += 5
         else:
             comfort -= 10
-
         comfort = max(0, min(100, comfort))
 
         if day_offset == 0:
@@ -834,48 +739,30 @@ class WeatherClient:
             day_name = target.strftime("%d.%m.%Y")
 
         commentary = []
-        commentary.append(
-            f"⏱ <b>{sun_title}:</b> {sun_desc}."
-        )
-        commentary.append(
-            f"🌀 <b>Тиск:</b> {pressure_mm:.1f} мм | "
-            f"{trend_text} | {stability_text}"
-        )
-        commentary.append(
-            f"🌡 <b>Температура:</b> повітря {temp:.1f}°C, "
-            f"вода орієнтовно ~{water_temp:.1f}°C"
-        )
-
+        commentary.append(f"⏱ <b>{sun_title}:</b> {sun_desc}.")
+        commentary.append(f"🌀 <b>Тиск:</b> {pressure_mm:.1f} мм | {trend_text} | {stability_text}")
+        commentary.append(f"🌡 <b>Температура:</b> повітря {temp:.1f}°C, вода орієнтовно ~{water_temp:.1f}°C")
         if water_temp > 25:
             commentary.append("• Спека — ищите глубину, тень и течение.")
         elif water_temp < 9:
             commentary.append("• Холодная вода — медленная подача и мелкая насадка.")
-
         if wind < 2:
             commentary.append(f"💨 Штиль: {wind:.1f} м/с ({direction}).")
         elif wind <= 6:
             commentary.append(f"💨 Ветер: {wind:.1f} м/с ({direction}) — рабочий диапазон.")
         else:
             commentary.append(f"💨 Сильный ветер: {wind:.1f} м/с ({direction}).")
-
         if precip > 1.5:
             commentary.append(f"🌧 Осадки: {precip:.1f} мм.")
         else:
             commentary.append(f"☁️ Облачность: {cloud:.0f}%.")
-
         commentary.append(f"🌕 {moon_text}")
         commentary.append(f"🌤 Комфорт: {comfort}/100")
         commentary.append(f"🎣 Насадка: {bait(fish, water_temp, wind)}")
-
         if predator:
-            commentary.append(
-                f"🎯 Для {fish}: ищите бровки, перепады глубины, течение."
-            )
+            commentary.append(f"🎯 Для {fish}: ищите бровки, перепады глубины, течение.")
         else:
-            commentary.append(
-                f"🎯 Для {fish}: точечная прикормка и аккуратная подача."
-            )
-
+            commentary.append(f"🎯 Для {fish}: точечная прикормка и аккуратная подача.")
         if score >= 78:
             verdict = "🏆 Отличные условия."
         elif score >= 55:
@@ -884,7 +771,6 @@ class WeatherClient:
             verdict = "🟠 Средние условия."
         else:
             verdict = "🔴 Сложные условия."
-
         commentary.append(f"\n{verdict}")
 
         return {
@@ -940,30 +826,14 @@ def make_image(result, region, body_name, fish):
     try:
         img = Image.new("RGB", (1000, 650), (240, 248, 255))
         draw = ImageDraw.Draw(img)
-
         font, bold, small = _load_fonts()
 
         draw.text((30, 20), "Fishing Forecast", font=bold, fill=(0, 0, 120))
-        draw.text(
-            (30, 65),
-            f"{body_name} | {fish}",
-            font=font,
-            fill=(50, 50, 50),
-        )
-        draw.text(
-            (30, 105),
-            f"{result['forecast_day']} | {result['hour']:02d}:00",
-            font=font,
-            fill=(50, 50, 50),
-        )
+        draw.text((30, 65), f"{body_name} | {fish}", font=font, fill=(50, 50, 50))
+        draw.text((30, 105), f"{result['forecast_day']} | {result['hour']:02d}:00", font=font, fill=(50, 50, 50))
 
         stars = "⭐" * result["stars"] + "☆" * (5 - result["stars"])
-        draw.text(
-            (30, 150),
-            f"Оценка: {result['stars']}/5 {stars}  ({result['score_100']}/100)",
-            font=bold,
-            fill=(180, 100, 0),
-        )
+        draw.text((30, 150), f"Оценка: {result['stars']}/5 {stars}  ({result['score_100']}/100)", font=bold, fill=(180, 100, 0))
 
         rows = [
             f"Температура воздуха: {result['temperature']}°C",
@@ -975,15 +845,12 @@ def make_image(result, region, body_name, fish):
             f"Осадки: {result['precipitation']} мм",
             f"Комфорт: {result['comfort_index']}/100",
         ]
-
         y = 205
         for row in rows:
             draw.text((30, y), row, font=font, fill=(0, 0, 0))
             y += 38
-
         draw.line((30, y + 5, 970, y + 5), fill=(180, 180, 180), width=2)
         y += 25
-
         verdict = (
             "ОТЛИЧНЫЕ УСЛОВИЯ" if result["score_100"] >= 78
             else "ХОРОШИЕ УСЛОВИЯ" if result["score_100"] >= 55
@@ -991,12 +858,10 @@ def make_image(result, region, body_name, fish):
             else "СЛОЖНЫЕ УСЛОВИЯ"
         )
         draw.text((30, y), verdict, font=bold, fill=(0, 100, 0))
-
         out = io.BytesIO()
         img.save(out, format="PNG")
         out.seek(0)
         return out.getvalue()
-
     except Exception as e:
         logging.exception("Ошибка генерации изображения: %s", e)
         return None
@@ -1052,10 +917,7 @@ def day_keyboard():
     names = ["Сьогодні", "Завтра", "Післязавтра"]
     for i, name in enumerate(names):
         d = today + timedelta(days=i)
-        builder.button(
-            text=f"📅 {name} ({d:%d.%m})",
-            callback_data=f"day_{i}",
-        )
+        builder.button(text=f"📅 {name} ({d:%d.%m})", callback_data=f"day_{i}")
     builder.adjust(1)
     builder.button(text="▶️ Своя година", callback_data="manual_hour")
     builder.row(
@@ -1079,10 +941,8 @@ def hour_keyboard(back="back_to_day"):
 
 def language_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🇺🇦 Українська", callback_data="lang_uk"),
-            InlineKeyboardButton(text="🇷🇺 Русский", callback_data="lang_ru"),
-        ]
+        [InlineKeyboardButton(text="🇺🇦 Українська", callback_data="lang_uk"),
+         InlineKeyboardButton(text="🇷🇺 Русский", callback_data="lang_ru")]
     ])
 
 
@@ -1136,7 +996,6 @@ async def region_handler(message: Message, state: FSMContext):
     await state.clear()
     await state.update_data(region=region)
     await state.set_state(ForecastStates.water_body)
-
     await message.answer(
         f"📍 <b>{region}</b>\n\nВыберите конкретный водоём:",
         reply_markup=water_keyboard(region),
@@ -1154,10 +1013,7 @@ async def back_region(message: Message, state: FSMContext):
 @dp.message(F.text == "📍 Моє місце")
 async def location_request(message: Message):
     kb = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(
-            text="📍 Надіслати геолокацію",
-            request_location=True
-        )]],
+        keyboard=[[KeyboardButton(text="📍 Надіслати геолокацію", request_location=True)]],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
@@ -1171,11 +1027,9 @@ async def location_request(message: Message):
 async def location_handler(message: Message, state: FSMContext):
     loc: Location = message.location
     region = nearest_region(loc.latitude, loc.longitude)
-
     await state.clear()
     await state.update_data(region=region)
     await state.set_state(ForecastStates.water_body)
-
     await message.answer(
         f"📍 Найближча область: <b>{region}</b>\n\n"
         "Теперь выберите водоём. Прогноз будет рассчитан по его координатам.",
@@ -1190,14 +1044,9 @@ async def location_handler(message: Message, state: FSMContext):
 async def water_menu(message: Message, state: FSMContext):
     data = await state.get_data()
     region = data.get("region")
-
     if not region:
-        await message.answer(
-            "Спочатку оберіть область.",
-            reply_markup=regions_keyboard(),
-        )
+        await message.answer("Спочатку оберіть область.", reply_markup=regions_keyboard())
         return
-
     await state.set_state(ForecastStates.water_body)
     await message.answer(
         f"🗺️ <b>Водойми: {region}</b>\nОберіть водойму:",
@@ -1210,17 +1059,14 @@ async def water_menu(message: Message, state: FSMContext):
 async def water_selected(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     region = data.get("region")
-
     if callback.data == "water_back":
         await state.set_state(ForecastStates.region)
         await callback.message.edit_text("Оберіть область.")
         await callback.answer()
         return
-
     if not region:
         await callback.answer("Сначала выберите область", show_alert=True)
         return
-
     try:
         idx = int(callback.data.split("_")[1])
         bodies = WATER_BODIES.get(region, [])
@@ -1230,16 +1076,13 @@ async def water_selected(callback: CallbackQuery, state: FSMContext):
     except Exception:
         await callback.answer("Ошибка выбора водоёма", show_alert=True)
         return
-
     await state.update_data(
         water_body=body["name"],
         latitude=body["lat"],
         longitude=body["lon"],
     )
     await state.set_state(ForecastStates.fish)
-
     maps_url = f"https://www.google.com/maps?q={body['lat']},{body['lon']}"
-
     await callback.message.edit_text(
         f"🗺 <b>{body['name']}</b>\n"
         f"📍 {body['lat']:.5f}, {body['lon']:.5f}\n\n"
@@ -1263,10 +1106,8 @@ async def fish_handler(message: Message, state: FSMContext):
     if not data.get("region") or not data.get("water_body"):
         await message.answer("Сначала выберите область и водоём.")
         return
-
     await state.update_data(fish=message.text)
     await state.set_state(ForecastStates.day)
-
     body = data["water_body"]
     await message.answer(
         f"🎣 Рыба: <b>{message.text}</b>\n"
@@ -1291,7 +1132,6 @@ async def day_selected(callback: CallbackQuery, state: FSMContext):
     offset = int(callback.data.split("_")[1])
     await state.update_data(day_offset=offset)
     await state.set_state(ForecastStates.hour)
-
     await callback.message.edit_text(
         "⏰ Выберите час:",
         reply_markup=hour_keyboard(),
@@ -1317,7 +1157,6 @@ async def manual_hour_text(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("Введите число от 0 до 23.")
         return
-
     await state.update_data(hour=hour)
     await run_forecast(message, state, hour)
 
@@ -1326,11 +1165,7 @@ async def manual_hour_text(message: Message, state: FSMContext):
 async def hour_selected(callback: CallbackQuery, state: FSMContext):
     hour = int(callback.data.split("_")[1])
     await state.update_data(hour=hour)
-
-    await run_forecast(
-        callback.message, state, hour,
-        callback_user_id=callback.from_user.id
-    )
+    await run_forecast(callback.message, state, hour, callback_user_id=callback.from_user.id)
     await callback.answer()
 
 
@@ -1344,15 +1179,11 @@ async def back_to_day(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# ---------------- MAIN MENU CALLBACK ----------------
 @dp.callback_query(F.data == "main_menu")
 async def main_menu_callback(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await state.set_state(ForecastStates.region)
-    await callback.message.edit_text(
-        T(callback.from_user.id, "start"),
-        parse_mode="HTML",
-    )
+    await callback.message.edit_text(T(callback.from_user.id, "start"), parse_mode="HTML")
     await callback.message.answer(
         "🏠 Вы вернулись в главное меню.",
         reply_markup=regions_keyboard(),
@@ -1363,7 +1194,6 @@ async def main_menu_callback(callback: CallbackQuery, state: FSMContext):
 async def run_forecast(message: Message, state: FSMContext, hour: int, callback_user_id=None):
     user_id = callback_user_id or message.from_user.id
     data = await state.get_data()
-
     region = data.get("region")
     body_name = data.get("water_body")
     fish = data.get("fish")
@@ -1390,12 +1220,9 @@ async def run_forecast(message: Message, state: FSMContext, hour: int, callback_
         await state.clear()
         return
 
-    forecast_id = save_forecast(
-        user_id, region, body, fish, result
-    )
+    forecast_id = save_forecast(user_id, region, body, fish, result)
 
     stars = "⭐" * result["stars"] + "☆" * (5 - result["stars"])
-
     if result["score_100"] >= 80:
         grade = "🟢 Отлично"
     elif result["score_100"] >= 60:
@@ -1430,13 +1257,9 @@ async def run_forecast(message: Message, state: FSMContext, hour: int, callback_
     )
 
     maps_url = f"https://www.google.com/maps?q={body['lat']},{body['lon']}"
-
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🗺 Открыть водоём", url=maps_url)],
-        [InlineKeyboardButton(
-            text="📢 Поделиться",
-            callback_data=f"share_{result['stars']}_{fish}"
-        )],
+        [InlineKeyboardButton(text="📢 Поделиться", callback_data=f"share_{result['stars']}_{fish}")],
         [
             InlineKeyboardButton(text="👍 Точный", callback_data=f"fb_good_{forecast_id}"),
             InlineKeyboardButton(text="👎 Хибный", callback_data=f"fb_bad_{forecast_id}"),
@@ -1446,7 +1269,6 @@ async def run_forecast(message: Message, state: FSMContext, hour: int, callback_
     ])
 
     image = make_image(result, region, body["name"], fish)
-
     if image:
         await message.answer_photo(
             photo=BufferedInputFile(image, filename="forecast.png"),
@@ -1474,11 +1296,9 @@ async def feedback_handler(callback: CallbackQuery):
     except ValueError:
         await callback.answer("Ошибка", show_alert=True)
         return
-
     save_feedback(callback.from_user.id, fid, rating)
     await callback.answer(
-        "Спасибо за обратную связь 👍" if rating == "good"
-        else "Спасибо за обратную связь 👎",
+        "Спасибо за обратную связь 👍" if rating == "good" else "Спасибо за обратную связь 👎",
         show_alert=True,
     )
 
@@ -1509,7 +1329,6 @@ async def history_handler(message: Message):
     if not rows:
         await message.answer(T(message.from_user.id, "history_empty"))
         return
-
     text = "📜 <b>Последние прогнозы:</b>\n\n"
     for r in rows:
         stars = "⭐" * (r["stars"] or 0) + "☆" * (5 - (r["stars"] or 0))
@@ -1520,7 +1339,6 @@ async def history_handler(message: Message):
             f"{stars}\n"
             f"🕒 {r['timestamp']}\n\n"
         )
-
     await message.answer(text, parse_mode="HTML")
 
 
@@ -1547,17 +1365,14 @@ async def subscription_region(message: Message, state: FSMContext):
 async def subscription_water(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     region = data.get("region")
-
     if callback.data == "subwater_back":
         await state.set_state(SubscribeStates.region)
         await callback.message.edit_text("Выберите область.")
         await callback.answer()
         return
-
     if not region:
         await callback.answer("Сначала выберите область", show_alert=True)
         return
-
     try:
         idx = int(callback.data.split("_")[1])
         bodies = WATER_BODIES.get(region, [])
@@ -1565,14 +1380,12 @@ async def subscription_water(callback: CallbackQuery, state: FSMContext):
     except Exception:
         await callback.answer("Ошибка выбора водоёма", show_alert=True)
         return
-
     await state.update_data(
         water_body=body["name"],
         latitude=body["lat"],
         longitude=body["lon"],
     )
     await state.set_state(SubscribeStates.fish)
-
     await callback.message.edit_text(
         f"🗺 {body['name']}\n\nВыберите рыбу:",
         reply_markup=fish_keyboard_inline(),
@@ -1585,12 +1398,10 @@ async def subscription_fish(callback: CallbackQuery, state: FSMContext):
     fish = callback.data[len("subfish_"):]
     await state.update_data(fish=fish)
     await state.set_state(SubscribeStates.hour)
-
     builder = InlineKeyboardBuilder()
     for hour in [6, 7, 8, 12, 18, 19, 20]:
         builder.button(text=f"{hour:02d}:00", callback_data=f"subhour_{hour}")
     builder.adjust(3)
-
     await callback.message.edit_text(
         "Выберите время ежедневной рассылки:",
         reply_markup=builder.as_markup(),
@@ -1602,21 +1413,12 @@ async def subscription_fish(callback: CallbackQuery, state: FSMContext):
 async def subscription_hour(callback: CallbackQuery, state: FSMContext):
     hour = int(callback.data.split("_")[1])
     data = await state.get_data()
-
     body = body_by_name(data["region"], data["water_body"])
     if not body:
         await callback.answer("Ошибка водоёма", show_alert=True)
         await state.clear()
         return
-
-    save_subscription(
-        callback.from_user.id,
-        data["region"],
-        body,
-        data["fish"],
-        hour,
-    )
-
+    save_subscription(callback.from_user.id, data["region"], body, data["fish"], hour)
     await state.clear()
     await callback.message.edit_text(
         T(callback.from_user.id, "subscribe_done") +
@@ -1645,17 +1447,11 @@ async def season_handler(message: Message):
 async def trophies(message: Message):
     rows = get_catches(message.from_user.id)
     if not rows:
-        await message.answer(
-            "У вас пока нет трофеев.\nИспользуйте /add_catch."
-        )
+        await message.answer("У вас пока нет трофеев.\nИспользуйте /add_catch.")
         return
-
     text = "🏆 <b>Ваши трофеи:</b>\n\n"
     for r in rows:
-        text += (
-            f"🐟 {r['fish_type']} — {r['weight']} г, {r['length']} см\n"
-            f"📍 {r['location']} | {r['date']}\n\n"
-        )
+        text += f"🐟 {r['fish_type']} — {r['weight']} г, {r['length']} см\n📍 {r['location']} | {r['date']}\n\n"
     await message.answer(text, parse_mode="HTML")
 
 
@@ -1681,7 +1477,6 @@ async def catch_weight(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("Введите положительное число.")
         return
-
     await state.update_data(weight=value)
     await state.set_state(TrophyStates.length)
     await message.answer("Введите длину в сантиметрах:")
@@ -1696,7 +1491,6 @@ async def catch_length(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("Введите положительное число.")
         return
-
     await state.update_data(length=value)
     await state.set_state(TrophyStates.location)
     await message.answer("Введите место ловли:")
@@ -1706,19 +1500,13 @@ async def catch_length(message: Message, state: FSMContext):
 async def catch_location(message: Message, state: FSMContext):
     await state.update_data(location=message.text)
     await state.set_state(TrophyStates.photo)
-    await message.answer(
-        "Отправьте фото или напишите /skip_photo."
-    )
+    await message.answer("Отправьте фото или напишите /skip_photo.")
 
 
 @dp.message(Command("skip_photo"), TrophyStates.photo)
 async def catch_skip_photo(message: Message, state: FSMContext):
     data = await state.get_data()
-    save_catch(
-        message.from_user.id,
-        data["fish"], data["weight"], data["length"],
-        data["location"], None,
-    )
+    save_catch(message.from_user.id, data["fish"], data["weight"], data["length"], data["location"], None)
     await state.clear()
     await message.answer("✅ Трофей сохранён!")
 
@@ -1726,11 +1514,7 @@ async def catch_skip_photo(message: Message, state: FSMContext):
 @dp.message(TrophyStates.photo, F.photo)
 async def catch_photo(message: Message, state: FSMContext):
     data = await state.get_data()
-    save_catch(
-        message.from_user.id,
-        data["fish"], data["weight"], data["length"],
-        data["location"], message.photo[-1].file_id,
-    )
+    save_catch(message.from_user.id, data["fish"], data["weight"], data["length"], data["location"], message.photo[-1].file_id)
     await state.clear()
     await message.answer("✅ Трофей сохранён с фото!")
 
@@ -1752,43 +1536,43 @@ async def language_set(callback: CallbackQuery, state: FSMContext):
     if lang not in {"uk", "ru"}:
         await callback.answer("Ошибка", show_alert=True)
         return
-
     set_user_lang(callback.from_user.id, lang)
     await state.clear()
-
     text = "Мову змінено на українську." if lang == "uk" else "Язык изменён на русский."
     await callback.message.edit_text(text)
     await callback.answer()
 
 
 # ============================================================
-# BACKGROUND TASKS
+# BACKGROUND TASKS (з покращенням)
 # ============================================================
 
 async def send_daily_forecasts():
-    for row in get_subscriptions():
-        try:
-            body = {
-                "name": row["water_body"],
-                "lat": row["latitude"],
-                "lon": row["longitude"],
-            }
-            result = await WeatherClient(
-                body["lat"], body["lon"]
-            ).evaluate(
-                row["fish_type"],
-                row["hour"],
-                0,
-            )
+    subscriptions = get_subscriptions()
+    if not subscriptions:
+        return
 
+    # Групуємо підписки за унікальними координатами, щоб зробити один запит на координати
+    grouped = {}
+    for row in subscriptions:
+        key = (row["latitude"], row["longitude"], row["fish_type"], row["hour"])
+        if key not in grouped:
+            grouped[key] = []
+        grouped[key].append(row["user_id"])
+
+    # Для кожної групи робимо один запит і надсилаємо всім підписникам цієї групи
+    for (lat, lon, fish, hour), user_ids in grouped.items():
+        try:
+            body = {"name": "unknown", "lat": lat, "lon": lon}
+            result = await WeatherClient(lat, lon).evaluate(fish, hour, 0)
             if not result:
                 continue
 
             text = (
                 f"🌅 <b>Ежедневный прогноз</b>\n\n"
                 f"🗺 {body['name']}\n"
-                f"🐟 {row['fish_type']}\n"
-                f"⏰ {row['hour']:02d}:00\n"
+                f"🐟 {fish}\n"
+                f"⏰ {hour:02d}:00\n"
                 f"⭐ {result['stars']}/5\n"
                 f"📊 {result['score_100']}/100\n"
                 f"🌡 {result['temperature']}°C\n"
@@ -1797,23 +1581,36 @@ async def send_daily_forecasts():
                 f"{result['expert_commentary']}"
             )
 
-            await bot.send_message(
-                row["user_id"],
-                text,
-                parse_mode="HTML",
-            )
+            # Відправляємо всім користувачам у цій групі
+            for user_id in user_ids:
+                try:
+                    await bot.send_message(user_id, text, parse_mode="HTML")
+                except Exception as e:
+                    logging.warning("Не вдалося надіслати прогноз користувачу %s: %s", user_id, e)
+
+            # Додаємо випадкову затримку між групами, щоб не створювати пікове навантаження на API
+            await asyncio.sleep(random.uniform(0.5, 2.0))
 
         except Exception as e:
-            logging.exception(
-                "Ошибка daily forecast user=%s: %s",
-                row["user_id"], e
-            )
+            logging.exception("Помилка в send_daily_forecasts для групи %s: %s", (lat, lon), e)
 
 
 async def check_extreme_weather():
-    for row in get_subscriptions():
+    subscriptions = get_subscriptions()
+    if not subscriptions:
+        return
+
+    # Групуємо за координатами, щоб зробити один запит
+    grouped = {}
+    for row in subscriptions:
+        key = (row["latitude"], row["longitude"])
+        if key not in grouped:
+            grouped[key] = []
+        grouped[key].append((row["user_id"], row["water_body"]))
+
+    for (lat, lon), users in grouped.items():
         try:
-            client = WeatherClient(row["latitude"], row["longitude"])
+            client = WeatherClient(lat, lon)
             data = await client.get()
             if not data:
                 continue
@@ -1830,20 +1627,22 @@ async def check_extreme_weather():
             delta = (b - a) * 0.75006
 
             if delta < -5:
-                await bot.send_message(
-                    row["user_id"],
+                alert_text = (
                     f"⚠️ <b>Резкое падение давления</b>\n"
-                    f"🗺 {row['water_body']}\n"
+                    f"🗺 {users[0][1]}\n"
                     f"Изменение: {delta:.1f} мм рт.ст.\n"
-                    f"Клёв может стать нестабильным.",
-                    parse_mode="HTML",
+                    f"Клёв может стать нестабильным."
                 )
+                for user_id, _ in users:
+                    try:
+                        await bot.send_message(user_id, alert_text, parse_mode="HTML")
+                    except Exception as e:
+                        logging.warning("Не вдалося надіслати попередження користувачу %s: %s", user_id, e)
+
+            await asyncio.sleep(random.uniform(0.5, 1.5))
 
         except Exception as e:
-            logging.exception(
-                "Extreme weather error user=%s: %s",
-                row["user_id"], e
-            )
+            logging.exception("Помилка check_extreme_weather для координат %s: %s", (lat, lon), e)
 
 
 # ============================================================
@@ -1904,7 +1703,7 @@ async def main():
 
     logging.info("Start polling")
     logging.info("Water-body coordinates are used for weather requests")
-    logging.info("Open-Meteo cache TTL: %s seconds", CACHE_TTL)
+    logging.info("Open-Meteo cache TTL: %s seconds (4 hours)", CACHE_TTL)
     logging.info("Wind speed unit forced to m/s")
 
     try:
