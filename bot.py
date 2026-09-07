@@ -43,7 +43,6 @@ REGIONS = {
 
 FISH_LIST = ["Лящ", "Карась", "Короп", "Щука", "Окунь", "Сом", "Плотва"]
 
-# Сезони нересту (місяці: 1-12)
 SPAWNING = {
     "Лящ": {"start": 4, "end": 6},
     "Щука": {"start": 3, "end": 4},
@@ -54,7 +53,6 @@ SPAWNING = {
     "Плотва": {"start": 4, "end": 6},
 }
 
-# Водойми (для карти)
 WATER_BODIES = {
     "Дніпропетровська": [
         {"name": "Каховське водосховище", "lat": 47.5, "lon": 34.2},
@@ -80,7 +78,6 @@ WATER_BODIES = {
     ],
 }
 
-# Мультимовність (базова)
 LANGUAGES = {
     "uk": {
         "start": "🎣 <b>Вітаю у Fishing Forecast!</b>\n\nОберіть область для прогнозу кльову або натисніть «📍 Моє місце», щоб визначити автоматично.",
@@ -120,12 +117,10 @@ LANGUAGES = {
     },
 }
 
-# ====================== КЕШ І RATE-LIMIT ======================
 weather_cache = {}
 CACHE_TTL = 2 * 60 * 60
 RATE_LIMIT_UNTIL = 0
 
-# ====================== СТАНІ ======================
 class ForecastStates(StatesGroup):
     choosing_region = State()
     choosing_fish = State()
@@ -148,7 +143,7 @@ class TrophyStates(StatesGroup):
     waiting_location = State()
     waiting_photo = State()
 
-# ====================== БАЗА ДАНИХ (РОЗШИРЕНА) ======================
+# ====================== БАЗА ДАНИХ ======================
 def init_db():
     conn = sqlite3.connect("fishing_forecast.db")
     cursor = conn.cursor()
@@ -214,7 +209,6 @@ def init_db():
             lang TEXT DEFAULT 'uk'
         )
     """)
-    # Додаємо стовпець hour, якщо ще немає
     try:
         cursor.execute("ALTER TABLE forecasts ADD COLUMN hour INTEGER")
     except sqlite3.OperationalError:
@@ -283,13 +277,6 @@ def add_subscription(user_id, region, fish_type, hour):
     cursor = conn.cursor()
     cursor.execute("INSERT OR REPLACE INTO subscriptions (user_id, region, fish_type, hour) VALUES (?, ?, ?, ?)",
                    (user_id, region, fish_type, hour))
-    conn.commit()
-    conn.close()
-
-def remove_subscription(user_id):
-    conn = sqlite3.connect("fishing_forecast.db")
-    cursor = conn.cursor()
-    cursor.execute("UPDATE subscriptions SET enabled=0 WHERE user_id=?", (user_id,))
     conn.commit()
     conn.close()
 
@@ -403,7 +390,7 @@ def get_season_status(fish_type):
             return "🟢 <b>Дозволено</b>", "дозволено"
     return "❓ Немає даних", "немає даних"
 
-# ====================== ПОГОДНИЙ КЛІЄНТ (ПОВНА ВЕРСІЯ) ======================
+# ====================== ПОГОДНИЙ КЛІЄНТ ======================
 class MultiSourceWeatherClient:
     def __init__(self, lat: float, lon: float):
         self.lat = lat
@@ -414,9 +401,7 @@ class MultiSourceWeatherClient:
         global RATE_LIMIT_UNTIL
         now = datetime.now().timestamp()
         if now < RATE_LIMIT_UNTIL:
-            logging.warning("Rate-limit cooldown активний — запит пропущено")
             return None
-
         model_param = f"&models={model}" if model else ""
         url = (
             f"https://api.open-meteo.com/v1/forecast?latitude={self.lat}&longitude={self.lon}"
@@ -424,7 +409,6 @@ class MultiSourceWeatherClient:
             f"wind_speed_10m,wind_direction_10m,cloud_cover,precipitation,sea_surface_temperature"
             f"{model_param}&timezone=auto&past_days=2&forecast_days=3"
         )
-
         for attempt in range(2):
             try:
                 timeout = aiohttp.ClientTimeout(total=15, connect=7)
@@ -434,40 +418,29 @@ class MultiSourceWeatherClient:
                     if resp.status == 429:
                         cooldown = 10 * 60 + attempt * 120
                         RATE_LIMIT_UNTIL = datetime.now().timestamp() + cooldown
-                        logging.error(f"Open-Meteo 429 → cooldown {cooldown // 60} хв (model={model})")
                         return None
-                    logging.error(f"Open-Meteo статус {resp.status} (model={model})")
                     await asyncio.sleep(2)
-            except Exception as e:
-                logging.warning(f"Помилка Open-Meteo (model={model}): {e}")
+            except:
                 await asyncio.sleep(2)
         return None
 
     async def get_averaged_weather(self):
         global RATE_LIMIT_UNTIL
         now = datetime.now().timestamp()
-
         if self.cache_key in weather_cache:
             data, ts = weather_cache[self.cache_key]
             if now - ts < CACHE_TTL:
-                logging.info("Використовую свіжий кеш погоди")
                 return data
-
         if now < RATE_LIMIT_UNTIL:
             if self.cache_key in weather_cache:
-                logging.info("Cooldown активний → віддаю застарілий кеш")
                 return weather_cache[self.cache_key][0]
-            logging.warning("Cooldown активний і кешу немає")
             return None
-
         async with aiohttp.ClientSession() as session:
             res = await self.fetch_open_meteo(session)
             if not res and datetime.now().timestamp() >= RATE_LIMIT_UNTIL:
-                logging.warning("GFS не відповів, пробую ECMWF...")
                 res = await self.fetch_open_meteo(session, "ecmwf_ifs04")
             if not res:
                 if self.cache_key in weather_cache:
-                    logging.info("API недоступне → віддаю застарілий кеш")
                     return weather_cache[self.cache_key][0]
                 return None
             weather_cache[self.cache_key] = (res, now)
@@ -476,67 +449,46 @@ class MultiSourceWeatherClient:
     def _pressure_score(self, pressure_mm: float, is_predator: bool) -> int:
         optimum = 748 if is_predator else 752
         diff = abs(pressure_mm - optimum)
-        if diff <= 3:
-            return 14
-        elif diff <= 6:
-            return 8
-        elif diff <= 10:
-            return 0
-        elif diff <= 15:
-            return -10
+        if diff <= 3: return 14
+        elif diff <= 6: return 8
+        elif diff <= 10: return 0
+        elif diff <= 15: return -10
         return -18
 
     def _pressure_trend_score(self, pressures: list, idx: int) -> Tuple[str, int]:
-        if idx < 24:
-            return "Недостатньо даних", 0
+        if idx < 24: return "Недостатньо даних", 0
         recent = [p for p in pressures[idx - 12:idx + 1] if p is not None]
         older = [p for p in pressures[idx - 24:idx - 12] if p is not None]
-        if len(recent) < 5 or len(older) < 5:
-            return "Недостатньо даних", 0
+        if len(recent) < 5 or len(older) < 5: return "Недостатньо даних", 0
         avg_recent = sum(recent) / len(recent)
         avg_older = sum(older) / len(older)
         delta = (avg_recent - avg_older) * 0.75006
-        if delta < -2.5:
-            return "📉 Сильно падає", 12
-        elif delta < -0.8:
-            return "📉 Повільно падає", 8
-        elif delta > 2.5:
-            return "📈 Сильно росте", -6
-        elif delta > 0.8:
-            return "📈 Повільно росте", 2
+        if delta < -2.5: return "📉 Сильно падає", 12
+        elif delta < -0.8: return "📉 Повільно падає", 8
+        elif delta > 2.5: return "📈 Сильно росте", -6
+        elif delta > 0.8: return "📈 Повільно росте", 2
         return "✅ Стабільний", 10
 
     def _stability_score(self, pressures: list, idx: int) -> Tuple[str, int]:
-        if idx < 48:
-            return "Недостатньо історії", 0
+        if idx < 48: return "Недостатньо історії", 0
         valid = [p for p in pressures[idx - 48:idx + 1] if p is not None]
-        if len(valid) < 20:
-            return "Недостатньо даних", 0
+        if len(valid) < 20: return "Недостатньо даних", 0
         diff = max(valid) - min(valid)
-        if diff <= 4:
-            return "✅ Дуже стабільний", 12
-        elif diff <= 7:
-            return "✅ Стабільний", 6
-        elif diff <= 11:
-            return "⚠️ Помірно мінливий", -4
+        if diff <= 4: return "✅ Дуже стабільний", 12
+        elif diff <= 7: return "✅ Стабільний", 6
+        elif diff <= 11: return "⚠️ Помірно мінливий", -4
         return "❌ Стрибкоподібний", -16
 
     def _temperature_score(self, temp: float, water_temp: float, is_predator: bool) -> int:
         if is_predator:
-            if 8 <= water_temp <= 16:
-                return 12
-            elif 5 <= water_temp <= 20:
-                return 6
-            elif water_temp > 24 or water_temp < 3:
-                return -10
+            if 8 <= water_temp <= 16: return 12
+            elif 5 <= water_temp <= 20: return 6
+            elif water_temp > 24 or water_temp < 3: return -10
             return 0
         else:
-            if 16 <= water_temp <= 23:
-                return 12
-            elif 12 <= water_temp <= 26:
-                return 6
-            elif water_temp > 28 or water_temp < 8:
-                return -8
+            if 16 <= water_temp <= 23: return 12
+            elif 12 <= water_temp <= 26: return 6
+            elif water_temp > 28 or water_temp < 8: return -8
             return 0
 
     def _wind_score(self, wind_ms: float, wind_dir: str, is_predator: bool) -> int:
@@ -557,39 +509,27 @@ class MultiSourceWeatherClient:
         return score
 
     def _precip_score(self, precip: float, is_predator: bool) -> int:
-        if precip <= 0.1:
-            return 0
-        elif 0.2 <= precip <= 1.8:
-            return 7 if is_predator else 4
-        elif precip <= 3.5:
-            return -6
+        if precip <= 0.1: return 0
+        elif 0.2 <= precip <= 1.8: return 7 if is_predator else 4
+        elif precip <= 3.5: return -6
         return -16
 
     def _cloud_score(self, cloud: float, is_predator: bool) -> int:
         if is_predator:
-            if cloud >= 70:
-                return 9
-            elif cloud >= 40:
-                return 4
+            if cloud >= 70: return 9
+            elif cloud >= 40: return 4
             return -3
         else:
-            if cloud >= 80:
-                return 2
-            elif cloud <= 30:
-                return 3
+            if cloud >= 80: return 2
+            elif cloud <= 30: return 3
             return 0
 
     def calculate_star_score(self, score_100: float) -> int:
-        if score_100 >= 84:
-            return 5
-        elif score_100 >= 68:
-            return 4
-        elif score_100 >= 50:
-            return 3
-        elif score_100 >= 32:
-            return 2
-        elif score_100 > 12:
-            return 1
+        if score_100 >= 84: return 5
+        elif score_100 >= 68: return 4
+        elif score_100 >= 50: return 3
+        elif score_100 >= 32: return 2
+        elif score_100 > 12: return 1
         return 0
 
     def generate_expert_commentary(
@@ -621,7 +561,6 @@ class MultiSourceWeatherClient:
         comfort_emoji = "🟢" if comfort_index >= 70 else "🟡" if comfort_index >= 40 else "🔴"
         comments.append(f"🌤 <b>Індекс комфорту:</b> {comfort_index}/100 {comfort_emoji}")
 
-        # Рекомендації приманок
         bait_rec = get_bait_recommendation(fish_type, water_temp, wind_ms, is_pred)
         comments.append(f"🎣 <b>Рекомендовані наживки:</b> {bait_rec}")
 
@@ -760,10 +699,9 @@ class MultiSourceWeatherClient:
             "comfort_index": comfort_index,
         }
 
-# ====================== ГЕНЕРАЦІЯ ЗОБРАЖЕННЯ ПРОГНОЗУ ======================
+# ====================== ГЕНЕРАЦІЯ ЗОБРАЖЕННЯ ======================
 async def generate_forecast_image(result, fish_type, region):
     try:
-        # Створюємо зображення
         img = Image.new('RGB', (800, 500), color=(240, 248, 255))
         draw = ImageDraw.Draw(img)
         try:
@@ -775,18 +713,13 @@ async def generate_forecast_image(result, fish_type, region):
             font_bold = font
             font_small = font
 
-        # Фон
         draw.rectangle([(0, 0), (800, 500)], fill=(240, 248, 255))
-
-        # Заголовок
         draw.text((30, 20), f"🎣 Прогноз кльову", font=font_bold, fill=(0, 0, 139))
         draw.text((30, 55), f"📍 {region} | {result['forecast_day']} | {result['hour']:02d}:00", font=font, fill=(70, 70, 70))
 
-        # Зірки
         stars_text = "⭐" * result['stars'] + "☆" * (5 - result['stars'])
         draw.text((30, 95), f"Оцінка: {result['stars']}/5 {stars_text}", font=font_bold, fill=(255, 140, 0))
 
-        # Погода
         y = 140
         draw.text((30, y), f"🌡 Температура: {result['temperature']}°C", font=font, fill=(0, 0, 0))
         y += 30
@@ -802,14 +735,11 @@ async def generate_forecast_image(result, fish_type, region):
         y += 30
         draw.text((30, y), f"🌤 Комфорт: {result['comfort_index']}/100", font=font, fill=(0, 0, 0))
 
-        # Рекомендації (скорочено)
         y += 40
         draw.text((30, y), f"🎯 Рекомендовані наживки: {get_bait_recommendation(fish_type, result['water_temp'], result['wind_ms'], fish_type in ['Щука','Окунь','Сом'])}", font=font_small, fill=(50, 50, 50))
 
-        # Лінія розділення
         draw.line([(30, y+30), (770, y+30)], fill=(200, 200, 200), width=2)
 
-        # Підсумок
         y += 50
         score = result['score_100']
         if score >= 80:
@@ -823,7 +753,6 @@ async def generate_forecast_image(result, fish_type, region):
             color = (255, 0, 0)
         draw.text((30, y), verdict, font=font_bold, fill=color)
 
-        # Зберігаємо в байти
         img_bytes = io.BytesIO()
         img.save(img_bytes, format='PNG')
         img_bytes.seek(0)
@@ -832,7 +761,7 @@ async def generate_forecast_image(result, fish_type, region):
         logging.error(f"Помилка генерації зображення: {e}")
         return None
 
-# ====================== MIDDLEWARE ДЛЯ МОВИ ======================
+# ====================== MIDDLEWARE ======================
 class LanguageMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         if hasattr(event, 'from_user') and event.from_user:
@@ -890,8 +819,16 @@ storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 dp.update.middleware(LanguageMiddleware())
 
+# Допоміжна функція для отримання словника мови, якщо _ = None
+def get_lang_dict(user_id, _=None):
+    if _ is not None:
+        return _
+    return LANGUAGES.get(get_user_lang(user_id), LANGUAGES["uk"])
+
 @dp.message(Command("start"))
-async def cmd_start(message: Message, state: FSMContext, lang: str = "uk", _: dict = None):
+async def cmd_start(message: Message, state: FSMContext, _: dict = None):
+    if _ is None:
+        _ = get_lang_dict(message.from_user.id)
     await state.clear()
     await state.set_state(ForecastStates.choosing_region)
     await message.answer(
@@ -903,10 +840,14 @@ async def cmd_start(message: Message, state: FSMContext, lang: str = "uk", _: di
 @dp.message(Command("help"))
 @dp.message(F.text == "ℹ️ Допомога")
 async def cmd_help(message: Message, _: dict = None):
+    if _ is None:
+        _ = get_lang_dict(message.from_user.id)
     await message.answer(_["help"], parse_mode="HTML")
 
 @dp.message(F.text == "📜 Моя історія")
 async def show_history(message: Message, _: dict = None):
+    if _ is None:
+        _ = get_lang_dict(message.from_user.id)
     rows = get_user_history_from_db(message.from_user.id)
     if not rows:
         await message.answer(_["history_empty"])
@@ -921,10 +862,14 @@ async def show_history(message: Message, _: dict = None):
 
 @dp.message(F.text == "🏠 Головне меню")
 async def main_menu(message: Message, state: FSMContext, _: dict = None):
-    await cmd_start(message, state)
+    if _ is None:
+        _ = get_lang_dict(message.from_user.id)
+    await cmd_start(message, state, _)
 
 @dp.message(F.text == "📍 Моє місце")
-async def ask_location(message: Message, state: FSMContext):
+async def ask_location(message: Message, state: FSMContext, _: dict = None):
+    if _ is None:
+        _ = get_lang_dict(message.from_user.id)
     kb = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="📍 Надіслати геолокацію", request_location=True)]],
         resize_keyboard=True,
@@ -937,6 +882,8 @@ async def ask_location(message: Message, state: FSMContext):
 
 @dp.message(F.location)
 async def handle_location(message: Message, state: FSMContext, _: dict = None):
+    if _ is None:
+        _ = get_lang_dict(message.from_user.id)
     location: Location = message.location
     lat, lon = location.latitude, location.longitude
     region = find_nearest_region(lat, lon)
@@ -956,6 +903,8 @@ async def handle_location(message: Message, state: FSMContext, _: dict = None):
 
 @dp.message(F.text.in_(REGIONS.keys()))
 async def handle_region(message: Message, state: FSMContext, _: dict = None):
+    if _ is None:
+        _ = get_lang_dict(message.from_user.id)
     await state.update_data(region=message.text)
     await state.set_state(ForecastStates.choosing_fish)
     await message.answer(
@@ -966,10 +915,14 @@ async def handle_region(message: Message, state: FSMContext, _: dict = None):
 
 @dp.message(F.text == "◀️ Змінити область")
 async def change_region(message: Message, state: FSMContext, _: dict = None):
-    await cmd_start(message, state)
+    if _ is None:
+        _ = get_lang_dict(message.from_user.id)
+    await cmd_start(message, state, _)
 
 @dp.message(F.text.in_(FISH_LIST))
 async def handle_fish(message: Message, state: FSMContext, _: dict = None):
+    if _ is None:
+        _ = get_lang_dict(message.from_user.id)
     data = await state.get_data()
     if "region" not in data:
         await message.answer("Спочатку оберіть область через /start")
@@ -999,12 +952,16 @@ async def handle_fish(message: Message, state: FSMContext, _: dict = None):
 
 @dp.callback_query(F.data == "back_to_fish")
 async def handle_back_to_fish(callback: CallbackQuery, state: FSMContext, _: dict = None):
+    if _ is None:
+        _ = get_lang_dict(callback.from_user.id)
     await state.set_state(ForecastStates.choosing_fish)
     await callback.message.edit_text("Оберіть рибу за допомогою кнопок нижче 👇")
     await callback.answer()
 
 @dp.callback_query(F.data == "manual_hour")
 async def manual_hour_start(callback: CallbackQuery, state: FSMContext, _: dict = None):
+    if _ is None:
+        _ = get_lang_dict(callback.from_user.id)
     await state.set_state(ForecastStates.choosing_hour_manual)
     await callback.message.edit_text(
         _["choose_hour"],
@@ -1014,6 +971,8 @@ async def manual_hour_start(callback: CallbackQuery, state: FSMContext, _: dict 
 
 @dp.callback_query(F.data.startswith("day_"))
 async def handle_day(callback: CallbackQuery, state: FSMContext, _: dict = None):
+    if _ is None:
+        _ = get_lang_dict(callback.from_user.id)
     day_offset = int(callback.data.split("_")[1])
     await state.update_data(day_offset=day_offset)
     await state.set_state(ForecastStates.choosing_hour)
@@ -1030,6 +989,8 @@ async def handle_day(callback: CallbackQuery, state: FSMContext, _: dict = None)
 
 @dp.callback_query(F.data == "back_to_day")
 async def handle_back_to_day(callback: CallbackQuery, state: FSMContext, _: dict = None):
+    if _ is None:
+        _ = get_lang_dict(callback.from_user.id)
     await state.set_state(ForecastStates.choosing_day)
     data = await state.get_data()
     fish_type = data.get("fish", "Рибу")
@@ -1056,6 +1017,8 @@ async def handle_back_to_day(callback: CallbackQuery, state: FSMContext, _: dict
 
 @dp.callback_query(F.data.startswith("hour_"))
 async def handle_hour(callback: CallbackQuery, state: FSMContext, _: dict = None):
+    if _ is None:
+        _ = get_lang_dict(callback.from_user.id)
     hour = int(callback.data.split("_")[1])
     data = await state.get_data()
 
@@ -1087,7 +1050,6 @@ async def handle_hour(callback: CallbackQuery, state: FSMContext, _: dict = None
         result["temperature"], result["stars"],
     )
 
-    # Генеруємо зображення
     image_data = await generate_forecast_image(result, fish_type, region)
 
     stars_bar = "⭐" * result["stars"] + "☆" * (5 - result["stars"])
@@ -1141,6 +1103,8 @@ async def handle_hour(callback: CallbackQuery, state: FSMContext, _: dict = None
 
 @dp.callback_query(F.data.startswith("fb_"))
 async def handle_feedback(callback: CallbackQuery, _: dict = None):
+    if _ is None:
+        _ = get_lang_dict(callback.from_user.id)
     parts = callback.data.split("_")
     rating = parts[1]
     forecast_id = int(parts[2])
@@ -1150,6 +1114,8 @@ async def handle_feedback(callback: CallbackQuery, _: dict = None):
 
 @dp.callback_query(F.data.startswith("share_"))
 async def handle_share(callback: CallbackQuery, _: dict = None):
+    if _ is None:
+        _ = get_lang_dict(callback.from_user.id)
     try:
         _, stars, fish, region = callback.data.split("_", 3)
         graphic = "⭐" * int(stars) + "☆" * (5 - int(stars))
@@ -1169,17 +1135,23 @@ async def handle_share(callback: CallbackQuery, _: dict = None):
 # ====================== ПІДПИСКА ======================
 @dp.message(F.text == "🔔 Підписка")
 async def subscribe_start(message: Message, state: FSMContext, _: dict = None):
+    if _ is None:
+        _ = get_lang_dict(message.from_user.id)
     await state.set_state(SubscribeStates.region)
     await message.answer("Оберіть область для підписки:", reply_markup=get_regions_keyboard())
 
 @dp.message(SubscribeStates.region, F.text.in_(REGIONS.keys()))
 async def subscribe_region(message: Message, state: FSMContext, _: dict = None):
+    if _ is None:
+        _ = get_lang_dict(message.from_user.id)
     await state.update_data(region=message.text)
     await state.set_state(SubscribeStates.fish)
     await message.answer("Оберіть рибу:", reply_markup=get_fish_keyboard())
 
 @dp.message(SubscribeStates.fish, F.text.in_(FISH_LIST))
 async def subscribe_fish(message: Message, state: FSMContext, _: dict = None):
+    if _ is None:
+        _ = get_lang_dict(message.from_user.id)
     await state.update_data(fish=message.text)
     await state.set_state(SubscribeStates.hour)
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -1191,6 +1163,8 @@ async def subscribe_fish(message: Message, state: FSMContext, _: dict = None):
 
 @dp.callback_query(F.data.startswith("sub_hour_"))
 async def subscribe_hour(callback: CallbackQuery, state: FSMContext, _: dict = None):
+    if _ is None:
+        _ = get_lang_dict(callback.from_user.id)
     hour = int(callback.data.split("_")[2])
     data = await state.get_data()
     add_subscription(callback.from_user.id, data['region'], data['fish'], hour)
@@ -1203,6 +1177,8 @@ async def subscribe_hour(callback: CallbackQuery, state: FSMContext, _: dict = N
 # ====================== ВОДОЙМИ ======================
 @dp.message(F.text == "🗺️ Водойми")
 async def show_water_bodies(message: Message, state: FSMContext, _: dict = None):
+    if _ is None:
+        _ = get_lang_dict(message.from_user.id)
     data = await state.get_data()
     region = data.get("region")
     if not region:
@@ -1221,6 +1197,8 @@ async def show_water_bodies(message: Message, state: FSMContext, _: dict = None)
 # ====================== СЕЗОНИ ======================
 @dp.message(F.text == "🗓 Сезон")
 async def show_season(message: Message, state: FSMContext, _: dict = None):
+    if _ is None:
+        _ = get_lang_dict(message.from_user.id)
     data = await state.get_data()
     fish = data.get("fish")
     if not fish:
@@ -1236,6 +1214,8 @@ async def show_season(message: Message, state: FSMContext, _: dict = None):
 # ====================== ТРОФЕЇ ======================
 @dp.message(F.text == "🎯 Мої трофеї")
 async def my_trophies(message: Message, state: FSMContext, _: dict = None):
+    if _ is None:
+        _ = get_lang_dict(message.from_user.id)
     rows = get_user_catches(message.from_user.id)
     if not rows:
         await message.answer("У вас поки немає записаних уловів.\nНадішліть /add_catch або скористайтеся кнопкою нижче.")
@@ -1313,7 +1293,7 @@ async def set_language(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.answer()
 
-# ====================== ШТОРМОВЕ ПОПЕРЕДЖЕННЯ (ФОН) ======================
+# ====================== ШТОРМОВЕ ПОПЕРЕДЖЕННЯ ТА РОЗСИЛКА (ФОН) ======================
 async def check_extreme_weather():
     subs = get_subscriptions()
     for user_id, region, fish_type, _ in subs:
