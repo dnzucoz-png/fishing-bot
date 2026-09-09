@@ -33,7 +33,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("Не задана переменная окружения BOT_TOKEN")
 
-GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID", "-1004434293069"))
+GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID", "-1003932214140"))
 GROUP_URL = os.getenv("GROUP_URL", "https://t.me/+rKxYkNg85aAwNzFi")
 DB_FILE = os.getenv("DB_FILE", "fishing_forecast.db")
 PORT = int(os.getenv("PORT", "10000"))
