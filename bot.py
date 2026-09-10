@@ -12,7 +12,7 @@ import aiohttp
 from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -33,15 +33,15 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("Не задана переменная окружения BOT_TOKEN")
 
-GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID", "-1003932214140"))
+GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID", "-1004434293069"))
 GROUP_URL = os.getenv("GROUP_URL", "https://t.me/+rKxYkNg85aAwNzFi")
 DB_FILE = os.getenv("DB_FILE", "fishing_forecast.db")
 PORT = int(os.getenv("PORT", "10000"))
 
 WEATHERAPI_KEY = os.getenv("WEATHERAPI_KEY", "")
 
-CACHE_TTL = 12 * 60 * 60          # 12 часов (было 8)
-RATE_LIMIT_COOLDOWN = 15 * 60     # 15 минут
+CACHE_TTL = 12 * 60 * 60
+RATE_LIMIT_COOLDOWN = 15 * 60
 HTTP_TIMEOUT = 20
 MAX_RETRIES = 2
 
@@ -94,6 +94,56 @@ SPAWNING = {
     "Плотва": (4, 6),
 }
 
+# ============================================================
+# СЕЗОННІ КОЕФІЦІЄНТИ (новое)
+# ============================================================
+
+# Бонус/штраф до базової оцінки в залежності від сезону та виду риби
+SEASON_BONUS = {
+    "Лящ":    {"spring": 8,  "summer": 4,  "autumn": 10, "winter": -6},
+    "Карась": {"spring": 6,  "summer": 10, "autumn": 6,  "winter": -10},
+    "Короп":  {"spring": 4,  "summer": 10, "autumn": 8,  "winter": -12},
+    "Щука":   {"spring": 10, "summer": 2,  "autumn": 12, "winter": 6},
+    "Окунь":  {"spring": 8,  "summer": 6,  "autumn": 10, "winter": 4},
+    "Сом":    {"spring": 2,  "summer": 12, "autumn": 6,  "winter": -15},
+    "Плотва": {"spring": 8,  "summer": 6,  "autumn": 8,  "winter": 0},
+}
+
+SEASON_NAMES = {
+    "uk": {"spring": "🌱 Весна", "summer": "☀️ Літо", "autumn": "🍂 Осінь", "winter": "❄️ Зима"},
+    "ru": {"spring": "🌱 Весна", "summer": "☀️ Лето", "autumn": "🍂 Осень", "winter": "❄️ Зима"},
+}
+
+SEASON_TIPS = {
+    "uk": {
+        "spring": "весняний жор перед нерестом",
+        "summer": "літня спека, шукайте глибину",
+        "autumn": "осінній жор перед зимівлею",
+        "winter": "зимова млявість, повільна проводка",
+    },
+    "ru": {
+        "spring": "весенний жор перед нерестом",
+        "summer": "летняя жара, ищите глубину",
+        "autumn": "осенний жор перед зимовкой",
+        "winter": "зимняя вялость, медленная проводка",
+    },
+}
+
+
+def get_season(month: int) -> str:
+    if month in (3, 4, 5):
+        return "spring"
+    if month in (6, 7, 8):
+        return "summer"
+    if month in (9, 10, 11):
+        return "autumn"
+    return "winter"
+
+
+def season_score(fish: str, month: int) -> int:
+    season = get_season(month)
+    return SEASON_BONUS.get(fish, {}).get(season, 0)
+
 
 # ============================================================
 # TEXTS
@@ -113,7 +163,7 @@ LANG = {
             "• температура повітря;\n"
             "• орієнтовна температура води;\n"
             "• вітер, напрямок, хмарність та опади;\n"
-            "• час доби та місячна фаза;\n"
+            "• час доби, місячна фаза та сезон;\n"
             "• окремі коефіцієнти для хижака і мирної риби.\n\n"
             "Дані погоди: Open-Meteo (основний), WeatherAPI (резервний).\n"
             "Кеш погоди: 12 годин, щоб зменшити навантаження на API."
@@ -134,8 +184,6 @@ LANG = {
         "temp_air": "🌡 Повітря:",
         "temp_water": "💧 Вода:",
         "pressure": "🌀 Тиск:",
-        "pressure_trend": "   {trend}",
-        "pressure_stability": "   {stability}",
         "wind": "💨 Вітер:",
         "humidity": "💧 Вологість:",
         "cloud": "☁️ Хмарність:",
@@ -148,44 +196,6 @@ LANG = {
         "grade_good": "🟡 Добре",
         "grade_medium": "🟠 Середньо",
         "grade_bad": "🔴 Погано",
-        "verdict_excellent": "🏆 Відмінні умови.",
-        "verdict_good": "⚖️ Хороші умови.",
-        "verdict_medium": "🟠 Середні умови.",
-        "verdict_bad": "🔴 Складні умови.",
-        "bait": "🎣 Насадка:",
-        "predator_tip": "🎯 Для {fish}: шукайте бровки, перепади глибини, течію.",
-        "peaceful_tip": "🎯 Для {fish}: точкове прикормлення і акуратна подача.",
-        "hot_tip": "• Спека — шукайте глибину, тінь і течію.",
-        "cold_tip": "• Холодна вода — повільна подача і дрібна насадка.",
-        "calm_wind": "💨 Штиль: {wind} м/с ({dir}).",
-        "normal_wind": "💨 Вітер: {wind} м/с ({dir}) — робочий діапазон.",
-        "strong_wind": "💨 Сильний вітер: {wind} м/с ({dir}).",
-        "precip_short": "🌧 Опади: {precip} мм.",
-        "cloud_short": "☁️ Хмарність: {cloud}%.",
-        "sunrise": "🌅 Світанок",
-        "sunset": "🌇 Захід сонця",
-        "night": "🌙 Ніч",
-        "day": "☀️ День",
-        "morning_activity": "ранкова активність",
-        "evening_activity": "вечірня активність",
-        "night_possible": "можливий нічний кльов",
-        "day_normal": "звичайна денна активність",
-        "moon_new": "🌑 Новомісяць",
-        "moon_waxing": "🌒 Зростаючий",
-        "moon_first_quarter": "🌓 Перша чверть",
-        "moon_full": "🌕 Повня",
-        "moon_waning": "🌖 Спадаючий",
-        "moon_last_quarter": "🌗 Остання чверть",
-        "moon_old": "🌘 Старий місяць",
-        "pressure_drop_strong": "📉 Сильно падає",
-        "pressure_drop_slow": "📉 Повільно падає",
-        "pressure_rise_strong": "📈 Сильно зростає",
-        "pressure_rise_slow": "📈 Повільно зростає",
-        "pressure_stable": "✅ Стабільний",
-        "pressure_stability_very": "✅ Дуже стабільний",
-        "pressure_stability_good": "✅ Стабільний",
-        "pressure_stability_changing": "⚠️ Змінюється",
-        "pressure_stability_sharp": "❌ Різко змінюється",
         "share_text": "📢 <b>{name} поділився прогнозом!</b>\n🎣 {fish}\n⭐ {stars}/5 {graphic}\n💬 Приєднуйтесь до риболовного клубу!",
         "history_title": "📜 <b>Останні прогнози:</b>",
         "season_title": "🗓 <b>Сезонність:</b>",
@@ -200,6 +210,10 @@ LANG = {
         "catch_saved": "✅ Трофей збережено!",
         "catch_saved_photo": "✅ Трофей збережено з фото!",
         "language_changed": "Мову змінено на українську.",
+        "location_send": "Надішліть геолокацію — я визначу найближчий населений пункт.",
+        "location_failed": "Не вдалося визначити населений пункт. Спробуйте ще раз або виберіть область вручну.",
+        "location_found": "📍 <b>{city}</b>\n🗺 Область: <b>{region}</b>\n🌐 Координати: {lat:.5f}, {lon:.5f}\n\n🐟 Тепер виберіть рибу:",
+        "menu_returned": "🏠 Ви повернулися в головне меню.",
     },
     "ru": {
         "start": (
@@ -214,7 +228,7 @@ LANG = {
             "• температура воздуха;\n"
             "• ориентировочная температура воды;\n"
             "• ветер, направление, облачность и осадки;\n"
-            "• время суток и фаза Луны;\n"
+            "• время суток, фаза Луны и сезон;\n"
             "• отдельные коэффициенты для хищника и мирной рыбы.\n\n"
             "Источник погоды: Open-Meteo (основной), WeatherAPI (резервный).\n"
             "Кэш погоды: 12 часов, чтобы снизить нагрузку на API."
@@ -235,8 +249,6 @@ LANG = {
         "temp_air": "🌡 Воздух:",
         "temp_water": "💧 Вода:",
         "pressure": "🌀 Давление:",
-        "pressure_trend": "   {trend}",
-        "pressure_stability": "   {stability}",
         "wind": "💨 Ветер:",
         "humidity": "💧 Влажность:",
         "cloud": "☁️ Облачность:",
@@ -249,44 +261,6 @@ LANG = {
         "grade_good": "🟡 Хорошо",
         "grade_medium": "🟠 Средне",
         "grade_bad": "🔴 Плохо",
-        "verdict_excellent": "🏆 Отличные условия.",
-        "verdict_good": "⚖️ Хорошие условия.",
-        "verdict_medium": "🟠 Средние условия.",
-        "verdict_bad": "🔴 Сложные условия.",
-        "bait": "🎣 Насадка:",
-        "predator_tip": "🎯 Для {fish}: ищите бровки, перепады глубины, течение.",
-        "peaceful_tip": "🎯 Для {fish}: точечная прикормка и аккуратная подача.",
-        "hot_tip": "• Спека — ищите глубину, тень и течение.",
-        "cold_tip": "• Холодная вода — медленная подача и мелкая насадка.",
-        "calm_wind": "💨 Штиль: {wind} м/с ({dir}).",
-        "normal_wind": "💨 Ветер: {wind} м/с ({dir}) — рабочий диапазон.",
-        "strong_wind": "💨 Сильный ветер: {wind} м/с ({dir}).",
-        "precip_short": "🌧 Осадки: {precip} мм.",
-        "cloud_short": "☁️ Облачность: {cloud}%.",
-        "sunrise": "🌅 Рассвет",
-        "sunset": "🌇 Закат",
-        "night": "🌙 Ночь",
-        "day": "☀️ День",
-        "morning_activity": "утренняя активность",
-        "evening_activity": "вечерняя активность",
-        "night_possible": "возможен ночной клёв",
-        "day_normal": "обычная дневная активность",
-        "moon_new": "🌑 Новолуние",
-        "moon_waxing": "🌒 Растущая",
-        "moon_first_quarter": "🌓 Первая четверть",
-        "moon_full": "🌕 Полнолуние",
-        "moon_waning": "🌖 Убывающая",
-        "moon_last_quarter": "🌗 Последняя четверть",
-        "moon_old": "🌘 Старый месяц",
-        "pressure_drop_strong": "📉 Сильно падает",
-        "pressure_drop_slow": "📉 Медленно падает",
-        "pressure_rise_strong": "📈 Сильно растёт",
-        "pressure_rise_slow": "📈 Медленно растёт",
-        "pressure_stable": "✅ Стабильный",
-        "pressure_stability_very": "✅ Очень стабильный",
-        "pressure_stability_good": "✅ Стабильный",
-        "pressure_stability_changing": "⚠️ Меняется",
-        "pressure_stability_sharp": "❌ Резко меняется",
         "share_text": "📢 <b>{name} поделился прогнозом!</b>\n🎣 {fish}\n⭐ {stars}/5 {graphic}\n💬 Присоединяйтесь к рыболовному клубу!",
         "history_title": "📜 <b>Последние прогнозы:</b>",
         "season_title": "🗓 <b>Сезонность:</b>",
@@ -301,6 +275,10 @@ LANG = {
         "catch_saved": "✅ Трофей сохранён!",
         "catch_saved_photo": "✅ Трофей сохранён с фото!",
         "language_changed": "Язык изменён на русский.",
+        "location_send": "Отправьте геолокацию — я определю ближайший населённый пункт.",
+        "location_failed": "Не удалось определить населённый пункт. Попробуйте ещё раз или выберите область вручную.",
+        "location_found": "📍 <b>{city}</b>\n🗺 Область: <b>{region}</b>\n🌐 Координаты: {lat:.5f}, {lon:.5f}\n\n🐟 Теперь выберите рыбу:",
+        "menu_returned": "🏠 Вы вернулись в главное меню.",
     }
 }
 
@@ -315,7 +293,7 @@ def T(user_id: int, key: str) -> str:
 # ============================================================
 
 def db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, timeout=10)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -381,7 +359,6 @@ def init_db():
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # Миграции
     existing = {row["name"] for row in cur.execute("PRAGMA table_info(forecasts)")}
     for name, sql in {
         "water_body": "ALTER TABLE forecasts ADD COLUMN water_body TEXT",
@@ -409,10 +386,13 @@ def init_db():
 
 
 def get_user_lang(user_id: int) -> str:
-    conn = db()
-    row = conn.execute("SELECT lang FROM user_language WHERE user_id=?", (user_id,)).fetchone()
-    conn.close()
-    return row["lang"] if row else "uk"
+    try:
+        conn = db()
+        row = conn.execute("SELECT lang FROM user_language WHERE user_id=?", (user_id,)).fetchone()
+        conn.close()
+        return row["lang"] if row else "uk"
+    except Exception:
+        return "uk"
 
 
 def set_user_lang(user_id: int, lang: str):
@@ -637,8 +617,41 @@ def bait(fish, water_temp, wind):
     return ", ".join(dict.fromkeys(result))
 
 
+async def get_location_name(lat: float, lon: float, lang: str = "uk") -> Optional[Dict]:
+    """
+    Reverse geocoding через BigDataCloud (без API-ключа).
+    Повертає dict з полями city, region, country або None.
+    """
+    url = "https://api.bigdatacloud.net/data/reverse-geocode-client"
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "localityLanguage": lang,
+    }
+    try:
+        timeout = aiohttp.ClientTimeout(total=8)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, timeout=timeout) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    city = (
+                        data.get("city")
+                        or data.get("locality")
+                        or data.get("principalSubdivision")
+                    )
+                    region = data.get("principalSubdivision")
+                    country = data.get("countryName")
+                    if city:
+                        return {"city": city, "region": region, "country": country}
+                else:
+                    logging.warning("Reverse geocoding HTTP %s", resp.status)
+    except Exception as e:
+        logging.warning("Reverse geocoding error: %s", e)
+    return None
+
+
 # ============================================================
-# WEATHER CLIENTS (Open-Meteo + WeatherAPI fallback)
+# WEATHER CLIENTS
 # ============================================================
 
 weather_cache = {}
@@ -646,7 +659,6 @@ rate_limit_until = 0.0
 
 
 class WeatherAPIClient:
-    """Резервный клиент для WeatherAPI (требуется API ключ)"""
     def __init__(self, lat, lon):
         self.lat = round(float(lat), 5)
         self.lon = round(float(lon), 5)
@@ -654,12 +666,10 @@ class WeatherAPIClient:
 
     async def get_forecast(self):
         if not WEATHERAPI_KEY:
-            logging.debug("WeatherAPI ключ не задан, пропускаем")
             return None
         now = time.time()
         cached = weather_cache.get(self.cache_key)
         if cached and now - cached["timestamp"] < CACHE_TTL:
-            logging.info("WeatherAPI: используем кеш для %s,%s", self.lat, self.lon)
             return cached["data"]
 
         url = "http://api.weatherapi.com/v1/forecast.json"
@@ -671,34 +681,23 @@ class WeatherAPIClient:
             "alerts": "no"
         }
         try:
+            timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT)
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params, timeout=HTTP_TIMEOUT) as resp:
+                async with session.get(url, params=params, timeout=timeout) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         converted = self._convert_wa_to_om(data)
-                        weather_cache[self.cache_key] = {
-                            "timestamp": now,
-                            "data": converted
-                        }
-                        logging.info("WeatherAPI: успешно получены данные для %s,%s", self.lat, self.lon)
+                        weather_cache[self.cache_key] = {"timestamp": now, "data": converted}
                         return converted
-                    else:
-                        logging.warning("WeatherAPI HTTP %s", resp.status)
         except Exception as e:
             logging.warning("WeatherAPI error: %s", e)
         return None
 
     def _convert_wa_to_om(self, wa_data):
-        """Преобразует ответ WeatherAPI в структуру, похожую на Open-Meteo"""
         hourly = {
-            "time": [],
-            "temperature_2m": [],
-            "surface_pressure": [],
-            "wind_speed_10m": [],
-            "wind_direction_10m": [],
-            "cloud_cover": [],
-            "precipitation": [],
-            "relative_humidity_2m": []
+            "time": [], "temperature_2m": [], "surface_pressure": [],
+            "wind_speed_10m": [], "wind_direction_10m": [], "cloud_cover": [],
+            "precipitation": [], "relative_humidity_2m": []
         }
         for day in wa_data.get("forecast", {}).get("forecastday", []):
             date = day["date"]
@@ -724,10 +723,8 @@ class WeatherClient:
 
     async def fetch(self, session, model=None):
         global rate_limit_until
-
         now = time.time()
         if now < rate_limit_until:
-            logging.warning("Open-Meteo cooldown активний, запит пропущено")
             return None
 
         params = {
@@ -756,9 +753,7 @@ class WeatherClient:
                         return await r.json()
                     if r.status == 429:
                         rate_limit_until = time.time() + RATE_LIMIT_COOLDOWN
-                        logging.warning("Open-Meteo 429: включён cooldown на %s с", RATE_LIMIT_COOLDOWN)
                         return None
-                    logging.warning("Open-Meteo HTTP %s, model=%s", r.status, model)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -768,53 +763,35 @@ class WeatherClient:
 
     async def get(self):
         now = time.time()
-
         cached = weather_cache.get(self.cache_key)
         if cached and now - cached["timestamp"] < CACHE_TTL:
-            logging.debug("Open-Meteo: используем кеш для %s,%s", self.lat, self.lon)
             return cached["data"]
 
-        # Если Open-Meteo в cooldown, пробуем WeatherAPI
         if now < rate_limit_until:
-            logging.info("Open-Meteo в cooldown, пробуем WeatherAPI для %s,%s", self.lat, self.lon)
-            wa = WeatherAPIClient(self.lat, self.lon)
-            wa_data = await wa.get_forecast()
+            wa_data = await WeatherAPIClient(self.lat, self.lon).get_forecast()
             if wa_data:
                 return wa_data
-            # Если WeatherAPI не дал данных, возвращаем кеш (даже устаревший)
             if cached:
-                logging.warning("Используем устаревший кеш для %s,%s", self.lat, self.lon)
                 return cached["data"]
             return None
 
-        # Пробуем Open-Meteo
         async with aiohttp.ClientSession() as session:
             data = await self.fetch(session, model=None)
             if not data:
-                # Пробуем ECMWF
                 data = await self.fetch(session, model="ecmwf_ifs04")
 
         if data:
-            weather_cache[self.cache_key] = {
-                "timestamp": now,
-                "data": data,
-            }
+            weather_cache[self.cache_key] = {"timestamp": now, "data": data}
             return data
 
-        # Если Open-Meteo не дал результат, пробуем WeatherAPI
-        logging.info("Open-Meteo не ответил, пробуем WeatherAPI для %s,%s", self.lat, self.lon)
-        wa = WeatherAPIClient(self.lat, self.lon)
-        wa_data = await wa.get_forecast()
+        wa_data = await WeatherAPIClient(self.lat, self.lon).get_forecast()
         if wa_data:
             return wa_data
 
-        # Последняя надежда – кеш (даже устаревший)
         if cached:
-            logging.warning("Используем устаревший кеш для %s,%s", self.lat, self.lon)
             return cached["data"]
         return None
 
-    # Остальные методы (pressure_score, pressure_trend, etc.) без изменений
     @staticmethod
     def pressure_score(mm, predator):
         optimum = 748 if predator else 752
@@ -968,6 +945,7 @@ class WeatherClient:
         predator = fish in PREDATORS
         lang = get_user_lang(user_id)
 
+        # ---- Розрахунок базової оцінки ----
         score = 48
         trend_text, trend_pts = self.pressure_trend(h.get("surface_pressure", []), idx, lang)
         stability_text, stability_pts = self.pressure_stability(h.get("surface_pressure", []), idx, lang)
@@ -977,6 +955,11 @@ class WeatherClient:
         score += self.wind_score(wind, direction, predator)
         score += self.precip_score(precip, predator)
         score += self.cloud_score(cloud, predator)
+
+        # ---- Сезон (новое) ----
+        season = get_season(target_date.month)
+        season_pts = SEASON_BONUS.get(fish, {}).get(season, 0)
+        score += season_pts
 
         sun_title, sun_desc, sun_pts = sun_activity(hour, lang)
         score += sun_pts
@@ -1015,9 +998,12 @@ class WeatherClient:
         else:
             day_name = target.strftime("%d.%m.%Y")
 
+        season_name = SEASON_NAMES[lang][season]
+        season_tip = SEASON_TIPS[lang][season]
         commentary = []
 
         if lang == "uk":
+            commentary.append(f"🗓 <b>Сезон:</b> {season_name} — {season_tip} ({season_pts:+d} балів)")
             commentary.append(f"⏱ <b>{sun_title}:</b> {sun_desc}.")
             commentary.append(f"🌀 <b>Тиск:</b> {pressure_mm:.1f} мм | {trend_text} | {stability_text}")
             commentary.append(f"🌡 <b>Температура:</b> повітря {temp:.1f}°C, вода орієнтовно ~{water_temp:.1f}°C")
@@ -1052,6 +1038,7 @@ class WeatherClient:
                 verdict = "🔴 Складні умови."
             commentary.append(f"\n{verdict}")
         else:
+            commentary.append(f"🗓 <b>Сезон:</b> {season_name} — {season_tip} ({season_pts:+d} баллов)")
             commentary.append(f"⏱ <b>{sun_title}:</b> {sun_desc}.")
             commentary.append(f"🌀 <b>Давление:</b> {pressure_mm:.1f} мм | {trend_text} | {stability_text}")
             commentary.append(f"🌡 <b>Температура:</b> воздух {temp:.1f}°C, вода ориентировочно ~{water_temp:.1f}°C")
@@ -1101,6 +1088,9 @@ class WeatherClient:
             "temperature": round(temp, 1),
             "water_temp": water_temp,
             "moon_phase": moon_text,
+            "season": season,
+            "season_name": season_name,
+            "season_pts": season_pts,
             "stars": stars,
             "score_100": score,
             "comfort_index": comfort,
@@ -1137,7 +1127,7 @@ def _load_fonts():
 
 def make_image(result, region, body_name, fish, user_id):
     try:
-        img = Image.new("RGB", (1000, 650), (240, 248, 255))
+        img = Image.new("RGB", (1000, 700), (240, 248, 255))
         draw = ImageDraw.Draw(img)
         font, bold, small = _load_fonts()
 
@@ -1151,6 +1141,7 @@ def make_image(result, region, body_name, fish, user_id):
         lang = get_user_lang(user_id)
         if lang == "uk":
             rows = [
+                f"Сезон: {result['season_name']} ({result['season_pts']:+d})",
                 f"Температура повітря: {result['temperature']}°C",
                 f"Вода: ~{result['water_temp']}°C (оцінка)",
                 f"Тиск: {result['pressure_mm']} мм",
@@ -1162,6 +1153,7 @@ def make_image(result, region, body_name, fish, user_id):
             ]
         else:
             rows = [
+                f"Сезон: {result['season_name']} ({result['season_pts']:+d})",
                 f"Температура воздуха: {result['temperature']}°C",
                 f"Вода: ~{result['water_temp']}°C (оценка)",
                 f"Давление: {result['pressure_mm']} мм",
@@ -1174,7 +1166,7 @@ def make_image(result, region, body_name, fish, user_id):
         y = 205
         for row in rows:
             draw.text((30, y), row, font=font, fill=(0, 0, 0))
-            y += 38
+            y += 36
         draw.line((30, y + 5, 970, y + 5), fill=(180, 180, 180), width=2)
         y += 25
         if result["score_100"] >= 78:
@@ -1196,7 +1188,7 @@ def make_image(result, region, body_name, fish, user_id):
 
 
 # ============================================================
-# KEYBOARDS (без изменений)
+# KEYBOARDS
 # ============================================================
 
 def regions_keyboard():
@@ -1290,6 +1282,25 @@ bot = Bot(BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 
+# ---- Глобальный обработчик ошибок ----
+@dp.errors()
+async def errors_handler(update: types.Update, exception: Exception):
+    logging.exception("❌ Необработанная ошибка: %s", exception)
+    return True
+
+
+# ---- Безопасное редактирование сообщения ----
+async def safe_edit_or_send(callback: CallbackQuery, text: str, reply_markup=None, parse_mode=None):
+    try:
+        await callback.message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except Exception as e:
+        logging.debug("edit_text failed (%s), sending new message", e)
+        try:
+            await callback.message.answer(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        except Exception as e2:
+            logging.warning("answer also failed: %s", e2)
+
+
 async def start_forecast(message: Message, state: FSMContext):
     await state.clear()
     await state.set_state(ForecastStates.region)
@@ -1311,6 +1322,12 @@ async def help_handler(message: Message):
     await message.answer(T(message.from_user.id, "help"), parse_mode="HTML")
 
 
+@dp.message(Command("cancel"))
+async def cancel_handler(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Скасовано. Натисніть /start для початку.", reply_markup=regions_keyboard())
+
+
 @dp.message(F.text == "🏠 Головне меню")
 async def menu_handler(message: Message, state: FSMContext):
     await start_forecast(message, state)
@@ -1325,7 +1342,7 @@ async def region_handler(message: Message, state: FSMContext):
     await state.update_data(region=region)
     await state.set_state(ForecastStates.water_body)
     await message.answer(
-        f"📍 <b>{region}</b>\n\nВыберите конкретный водоём:",
+        f"📍 <b>{region}</b>\n\nОберіть конкретну водойму:",
         reply_markup=water_keyboard(region),
         parse_mode="HTML",
     )
@@ -1336,43 +1353,63 @@ async def back_region(message: Message, state: FSMContext):
     await start_forecast(message, state)
 
 
-# ---------------- LOCATION ----------------
+# ---------------- LOCATION (ОБНОВЛЕНО) ----------------
 
 @dp.message(F.text == "📍 Моє місце")
 async def location_request(message: Message):
     kb = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="📍 Надіслати геолокацію", request_location=True)]
-        ],
+        keyboard=[[KeyboardButton(text="📍 Надіслати геолокацію", request_location=True)]],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
-    await message.answer(
-        "Надішліть геолокацію — я визначу найближчу область.",
-        reply_markup=kb,
-    )
+    await message.answer(T(message.from_user.id, "location_send"), reply_markup=kb)
+
 
 @dp.message(F.location)
 async def location_handler(message: Message, state: FSMContext):
     loc: Location = message.location
+    user_id = message.from_user.id
+    lang = get_user_lang(user_id)
+    locality_lang = "uk" if lang == "uk" else "ru"
+
     logging.info(f"📍 Отримано геолокацію: lat={loc.latitude}, lon={loc.longitude}")
 
-    region = nearest_region(loc.latitude, loc.longitude)
-    logging.info(f"📍 Визначено область: {region}")
+    # Reverse geocoding → конкретний населений пункт
+    place = await get_location_name(loc.latitude, loc.longitude, locality_lang)
 
-    if not region:
-        await message.answer("Не вдалося визначити область. Виберіть вручну.")
-        return
+    if place and place.get("city"):
+        city_name = place["city"]
+        region_name = place.get("region") or nearest_region(loc.latitude, loc.longitude)
+    else:
+        # Fallback: якщо reverse geocoding не спрацював – використовуємо найближчу область
+        region_name = nearest_region(loc.latitude, loc.longitude)
+        city_name = region_name
+        if not region_name:
+            await message.answer(T(user_id, "location_failed"))
+            return
+
+    user_body_name = f"📍 {city_name}"
 
     await state.clear()
-    await state.update_data(region=region)
-    await state.set_state(ForecastStates.water_body)
+    await state.update_data(
+        region=region_name,
+        water_body=user_body_name,
+        latitude=loc.latitude,
+        longitude=loc.longitude,
+    )
+    await state.set_state(ForecastStates.fish)
+
     await message.answer(
-        f"📍 Найближча область: <b>{region}</b>\n\n"
-        "Тепер виберіть водойму. Прогноз буде розраховано за її координатами.",
-        reply_markup=water_keyboard(region),
+        T(user_id, "location_found").format(
+            city=city_name,
+            region=region_name,
+            lat=loc.latitude,
+            lon=loc.longitude,
+        ),
+        reply_markup=fish_keyboard(),
         parse_mode="HTML",
     )
+
 
 # ---------------- WATER BODY ----------------
 
@@ -1397,7 +1434,7 @@ async def water_selected(callback: CallbackQuery, state: FSMContext):
     region = data.get("region")
     if callback.data == "water_back":
         await state.set_state(ForecastStates.region)
-        await callback.message.edit_text("Оберіть область.")
+        await safe_edit_or_send(callback, "Оберіть область.")
         await callback.answer()
         return
     if not region:
@@ -1419,18 +1456,15 @@ async def water_selected(callback: CallbackQuery, state: FSMContext):
     )
     await state.set_state(ForecastStates.fish)
     maps_url = f"https://www.google.com/maps?q={body['lat']},{body['lon']}"
-    await callback.message.edit_text(
+    await safe_edit_or_send(
+        callback,
         f"🗺 <b>{body['name']}</b>\n"
         f"📍 {body['lat']:.5f}, {body['lon']:.5f}\n\n"
         f"<a href='{maps_url}'>Открыть точку на карте</a>\n\n"
         "Теперь выберите рыбу:",
-        reply_markup=None,
         parse_mode="HTML",
     )
-    await callback.message.answer(
-        "🐟 Выберите рыбу:",
-        reply_markup=fish_keyboard(),
-    )
+    await callback.message.answer("🐟 Выберите рыбу:", reply_markup=fish_keyboard())
     await callback.answer()
 
 
@@ -1439,7 +1473,7 @@ async def water_selected(callback: CallbackQuery, state: FSMContext):
 @dp.message(F.text.in_(FISH_LIST))
 async def fish_handler(message: Message, state: FSMContext):
     data = await state.get_data()
-    if not data.get("region") or not data.get("water_body"):
+    if not data.get("water_body") or data.get("latitude") is None:
         await message.answer("Сначала выберите область и водоём.")
         return
     await state.update_data(fish=message.text)
@@ -1447,7 +1481,7 @@ async def fish_handler(message: Message, state: FSMContext):
     body = data["water_body"]
     await message.answer(
         f"🎣 Рыба: <b>{message.text}</b>\n"
-        f"🗺 Водоём: <b>{body}</b>\n\n"
+        f"🗺 Место: <b>{body}</b>\n\n"
         "Выберите день:",
         reply_markup=day_keyboard(),
         parse_mode="HTML",
@@ -1457,7 +1491,7 @@ async def fish_handler(message: Message, state: FSMContext):
 @dp.callback_query(F.data == "back_to_fish")
 async def back_to_fish(callback: CallbackQuery, state: FSMContext):
     await state.set_state(ForecastStates.fish)
-    await callback.message.edit_text("🐟 Выберите рыбу кнопками ниже.")
+    await safe_edit_or_send(callback, "🐟 Выберите рыбу кнопками ниже.")
     await callback.answer()
 
 
@@ -1465,22 +1499,21 @@ async def back_to_fish(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("day_"))
 async def day_selected(callback: CallbackQuery, state: FSMContext):
-    offset = int(callback.data.split("_")[1])
+    try:
+        offset = int(callback.data.split("_")[1])
+    except Exception:
+        await callback.answer("Ошибка", show_alert=True)
+        return
     await state.update_data(day_offset=offset)
     await state.set_state(ForecastStates.hour)
-    await callback.message.edit_text(
-        "⏰ Выберите час:",
-        reply_markup=hour_keyboard(),
-    )
+    await safe_edit_or_send(callback, "⏰ Выберите час:", reply_markup=hour_keyboard())
     await callback.answer()
 
 
 @dp.callback_query(F.data == "manual_hour")
 async def manual_hour(callback: CallbackQuery, state: FSMContext):
     await state.set_state(ForecastStates.manual_hour)
-    await callback.message.edit_text(
-        "Введите час числом от 0 до 23.\nНапример: 17",
-    )
+    await safe_edit_or_send(callback, "Введите час числом от 0 до 23.\nНапример: 17")
     await callback.answer()
 
 
@@ -1499,7 +1532,11 @@ async def manual_hour_text(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("hour_"))
 async def hour_selected(callback: CallbackQuery, state: FSMContext):
-    hour = int(callback.data.split("_")[1])
+    try:
+        hour = int(callback.data.split("_")[1])
+    except Exception:
+        await callback.answer("Ошибка", show_alert=True)
+        return
     await state.update_data(hour=hour)
     await run_forecast(callback.message, state, hour, callback_user_id=callback.from_user.id)
     await callback.answer()
@@ -1508,24 +1545,38 @@ async def hour_selected(callback: CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data == "back_to_day")
 async def back_to_day(callback: CallbackQuery, state: FSMContext):
     await state.set_state(ForecastStates.day)
-    await callback.message.edit_text(
-        "Выберите день:",
-        reply_markup=day_keyboard(),
-    )
+    await safe_edit_or_send(callback, "Выберите день:", reply_markup=day_keyboard())
     await callback.answer()
 
+
+# ---------------- MAIN MENU (ФИКС) ----------------
 
 @dp.callback_query(F.data == "main_menu")
 async def main_menu_callback(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
     await state.clear()
     await state.set_state(ForecastStates.region)
-    await callback.message.edit_text(T(callback.from_user.id, "start"), parse_mode="HTML")
-    await callback.message.answer(
-        "🏠 Вы вернулись в главное меню.",
-        reply_markup=regions_keyboard(),
-    )
-    await callback.answer()
 
+    # Убираем кнопки у сообщения (работает и для фото, и для текста)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception as e:
+        logging.debug("edit_reply_markup failed: %s", e)
+
+    # Отправляем новое сообщение с меню
+    try:
+        await callback.message.answer(
+            T(user_id, "start"),
+            reply_markup=regions_keyboard(),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logging.warning("main_menu answer failed: %s", e)
+
+    await callback.answer("🏠 Головне меню")
+
+
+# ---------------- RUN FORECAST (ОБНОВЛЕНО) ----------------
 
 async def run_forecast(message: Message, state: FSMContext, hour: int, callback_user_id=None):
     user_id = callback_user_id or message.from_user.id
@@ -1534,17 +1585,16 @@ async def run_forecast(message: Message, state: FSMContext, hour: int, callback_
     body_name = data.get("water_body")
     fish = data.get("fish")
     day_offset = int(data.get("day_offset", 0))
+    lat = data.get("latitude")
+    lon = data.get("longitude")
 
-    if not region or not body_name or not fish:
+    if not body_name or not fish or lat is None or lon is None:
         await message.answer("Не хватает данных. Нажмите /start.")
         await state.clear()
         return
 
-    body = body_by_name(region, body_name)
-    if not body:
-        await message.answer("Водоём не найден. Нажмите /start.")
-        await state.clear()
-        return
+    # Используем координаты из state (геолокация ИЛИ выбранная водоёма)
+    body = {"name": body_name, "lat": lat, "lon": lon}
 
     await message.answer(T(user_id, "processing"))
 
@@ -1556,10 +1606,9 @@ async def run_forecast(message: Message, state: FSMContext, hour: int, callback_
         await state.clear()
         return
 
-    forecast_id = save_forecast(user_id, region, body, fish, result)
+    forecast_id = save_forecast(user_id, region or "", body, fish, result)
 
     stars = "⭐" * result["stars"] + "☆" * (5 - result["stars"])
-    lang = get_user_lang(user_id)
     if result["score_100"] >= 80:
         grade = T(user_id, "grade_excellent")
     elif result["score_100"] >= 60:
@@ -1579,7 +1628,7 @@ async def run_forecast(message: Message, state: FSMContext, hour: int, callback_
         f"{T(user_id, 'stars_label')} {result['stars']}/5 {stars}\n"
         f"{T(user_id, 'score_label')} {grade} — {result['score_100']}/100\n\n"
         f"{T(user_id, 'temp_air')} {result['temperature']}°C\n"
-        f"{T(user_id, 'temp_water')} ~{result['water_temp']}°C <i>(розрахункова оцінка)</i>\n"
+        f"{T(user_id, 'temp_water')} ~{result['water_temp']}°C\n"
         f"{T(user_id, 'pressure')} {result['pressure_mm']} мм\n"
         f"   {result['pressure_trend']}\n"
         f"   {result['pressure_stability']}\n"
@@ -1588,6 +1637,7 @@ async def run_forecast(message: Message, state: FSMContext, hour: int, callback_
         f"{T(user_id, 'cloud')} {result['cloud_cover']}%\n"
         f"{T(user_id, 'precip')} {result['precipitation']} мм\n"
         f"{T(user_id, 'moon')} {result['moon_phase']}\n"
+        f"🗓 {result['season_name']} ({result['season_pts']:+d})\n"
         f"{T(user_id, 'comfort')} {result['comfort_index']}/100\n\n"
         f"{T(user_id, 'recommendations')}\n{result['expert_commentary']}\n\n"
         f"{T(user_id, 'footer')}"
@@ -1595,7 +1645,7 @@ async def run_forecast(message: Message, state: FSMContext, hour: int, callback_
 
     maps_url = f"https://www.google.com/maps?q={body['lat']},{body['lon']}"
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🗺 Открыть водоём", url=maps_url)],
+        [InlineKeyboardButton(text="🗺 Открыть место", url=maps_url)],
         [InlineKeyboardButton(text="📢 Поделиться", callback_data=f"share_{result['stars']}_{fish}")],
         [
             InlineKeyboardButton(text="👍 Точный", callback_data=f"fb_good_{forecast_id}"),
@@ -1605,16 +1655,19 @@ async def run_forecast(message: Message, state: FSMContext, hour: int, callback_
         [InlineKeyboardButton(text="🏠 Головне меню", callback_data="main_menu")],
     ])
 
-    image = make_image(result, region, body["name"], fish, user_id)
-    if image:
-        await message.answer_photo(
-            photo=BufferedInputFile(image, filename="forecast.png"),
-            caption=text,
-            reply_markup=kb,
-            parse_mode="HTML",
-        )
-    else:
-        await message.answer(text, reply_markup=kb, parse_mode="HTML")
+    image = make_image(result, region or "", body["name"], fish, user_id)
+    try:
+        if image:
+            await message.answer_photo(
+                photo=BufferedInputFile(image, filename="forecast.png"),
+                caption=text,
+                reply_markup=kb,
+                parse_mode="HTML",
+            )
+        else:
+            await message.answer(text, reply_markup=kb, parse_mode="HTML")
+    except Exception as e:
+        logging.exception("Ошибка отправки прогноза: %s", e)
 
     await state.clear()
 
@@ -1633,7 +1686,10 @@ async def feedback_handler(callback: CallbackQuery):
     except ValueError:
         await callback.answer("Ошибка", show_alert=True)
         return
-    save_feedback(callback.from_user.id, fid, rating)
+    try:
+        save_feedback(callback.from_user.id, fid, rating)
+    except Exception as e:
+        logging.warning("save_feedback failed: %s", e)
     await callback.answer(
         "Спасибо за обратную связь 👍" if rating == "good" else "Спасибо за обратную связь 👎",
         show_alert=True,
@@ -1643,11 +1699,15 @@ async def feedback_handler(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("share_"))
 async def share_handler(callback: CallbackQuery):
     try:
-        _, stars, fish = callback.data.split("_", 2)
+        parts = callback.data.split("_", 2)
+        if len(parts) < 3:
+            await callback.answer("Ошибка", show_alert=True)
+            return
+        _, stars, fish = parts
         graphic = "⭐" * int(stars) + "☆" * (5 - int(stars))
         lang = get_user_lang(callback.from_user.id)
         share_text = LANG[lang]["share_text"].format(
-            name=callback.from_user.first_name,
+            name=callback.from_user.first_name or "Рибалка",
             fish=fish,
             stars=stars,
             graphic=graphic
@@ -1663,7 +1723,11 @@ async def share_handler(callback: CallbackQuery):
 
 @dp.message(F.text == "📜 Моя історія")
 async def history_handler(message: Message):
-    rows = get_history(message.from_user.id)
+    try:
+        rows = get_history(message.from_user.id)
+    except Exception as e:
+        logging.warning("get_history failed: %s", e)
+        rows = []
     if not rows:
         await message.answer(T(message.from_user.id, "history_empty"))
         return
@@ -1705,7 +1769,7 @@ async def subscription_water(callback: CallbackQuery, state: FSMContext):
     region = data.get("region")
     if callback.data == "subwater_back":
         await state.set_state(SubscribeStates.region)
-        await callback.message.edit_text("Выберите область.")
+        await safe_edit_or_send(callback, "Выберите область.")
         await callback.answer()
         return
     if not region:
@@ -1724,7 +1788,8 @@ async def subscription_water(callback: CallbackQuery, state: FSMContext):
         longitude=body["lon"],
     )
     await state.set_state(SubscribeStates.fish)
-    await callback.message.edit_text(
+    await safe_edit_or_send(
+        callback,
         f"🗺 {body['name']}\n\nВыберите рыбу:",
         reply_markup=fish_keyboard_inline(),
     )
@@ -1740,7 +1805,8 @@ async def subscription_fish(callback: CallbackQuery, state: FSMContext):
     for hour in [6, 7, 8, 12, 18, 19, 20]:
         builder.button(text=f"{hour:02d}:00", callback_data=f"subhour_{hour}")
     builder.adjust(3)
-    await callback.message.edit_text(
+    await safe_edit_or_send(
+        callback,
         "Выберите время ежедневной рассылки:",
         reply_markup=builder.as_markup(),
     )
@@ -1749,18 +1815,38 @@ async def subscription_fish(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("subhour_"))
 async def subscription_hour(callback: CallbackQuery, state: FSMContext):
-    hour = int(callback.data.split("_")[1])
-    data = await state.get_data()
-    body = body_by_name(data["region"], data["water_body"])
-    if not body:
-        await callback.answer("Ошибка водоёма", show_alert=True)
-        await state.clear()
+    try:
+        hour = int(callback.data.split("_")[1])
+    except Exception:
+        await callback.answer("Ошибка", show_alert=True)
         return
-    save_subscription(callback.from_user.id, data["region"], body, data["fish"], hour)
+    data = await state.get_data()
+    body = body_by_name(data.get("region", ""), data.get("water_body", ""))
+    if not body:
+        # Возможно, это был геолокационный водоём – используем сохранённые координаты
+        lat = data.get("latitude")
+        lon = data.get("longitude")
+        name = data.get("water_body")
+        if lat is None or lon is None or not name:
+            await callback.answer("Ошибка водоёма", show_alert=True)
+            await state.clear()
+            return
+        body = {"name": name, "lat": lat, "lon": lon}
+    try:
+        save_subscription(
+            callback.from_user.id,
+            data.get("region", ""),
+            body,
+            data.get("fish", ""),
+            hour,
+        )
+    except Exception as e:
+        logging.warning("save_subscription failed: %s", e)
     await state.clear()
-    await callback.message.edit_text(
+    await safe_edit_or_send(
+        callback,
         T(callback.from_user.id, "subscribe_done") +
-        f"\n🗺 {body['name']}\n🐟 {data['fish']}\n⏰ {hour:02d}:00"
+        f"\n🗺 {body['name']}\n🐟 {data.get('fish', '')}\n⏰ {hour:02d}:00"
     )
     await callback.answer()
 
@@ -1781,7 +1867,11 @@ async def season_handler(message: Message):
 
 @dp.message(F.text == "🎯 Мої трофеї")
 async def trophies(message: Message):
-    rows = get_catches(message.from_user.id)
+    try:
+        rows = get_catches(message.from_user.id)
+    except Exception as e:
+        logging.warning("get_catches failed: %s", e)
+        rows = []
     if not rows:
         await message.answer(T(message.from_user.id, "trophies_empty"))
         return
@@ -1842,7 +1932,10 @@ async def catch_location(message: Message, state: FSMContext):
 @dp.message(Command("skip_photo"), TrophyStates.photo)
 async def catch_skip_photo(message: Message, state: FSMContext):
     data = await state.get_data()
-    save_catch(message.from_user.id, data["fish"], data["weight"], data["length"], data["location"], None)
+    try:
+        save_catch(message.from_user.id, data["fish"], data["weight"], data["length"], data["location"], None)
+    except Exception as e:
+        logging.warning("save_catch failed: %s", e)
     await state.clear()
     await message.answer(T(message.from_user.id, "catch_saved"))
 
@@ -1850,7 +1943,13 @@ async def catch_skip_photo(message: Message, state: FSMContext):
 @dp.message(TrophyStates.photo, F.photo)
 async def catch_photo(message: Message, state: FSMContext):
     data = await state.get_data()
-    save_catch(message.from_user.id, data["fish"], data["weight"], data["length"], data["location"], message.photo[-1].file_id)
+    try:
+        save_catch(
+            message.from_user.id, data["fish"], data["weight"],
+            data["length"], data["location"], message.photo[-1].file_id
+        )
+    except Exception as e:
+        logging.warning("save_catch failed: %s", e)
     await state.clear()
     await message.answer(T(message.from_user.id, "catch_saved_photo"))
 
@@ -1874,7 +1973,7 @@ async def language_set(callback: CallbackQuery, state: FSMContext):
         return
     set_user_lang(callback.from_user.id, lang)
     await state.clear()
-    await callback.message.edit_text(T(callback.from_user.id, "language_changed"))
+    await safe_edit_or_send(callback, T(callback.from_user.id, "language_changed"))
     await callback.answer()
 
 
@@ -1883,112 +1982,115 @@ async def language_set(callback: CallbackQuery, state: FSMContext):
 # ============================================================
 
 async def send_daily_forecasts():
-    subscriptions = get_subscriptions()
-    if not subscriptions:
-        return
+    try:
+        subscriptions = get_subscriptions()
+        if not subscriptions:
+            return
 
-    grouped = {}
-    for row in subscriptions:
-        key = (row["latitude"], row["longitude"], row["fish_type"], row["hour"])
-        if key not in grouped:
-            grouped[key] = {
-                "users": [],
-                "water_body": row["water_body"],
-                "region": row["region"],
-            }
-        grouped[key]["users"].append(row["user_id"])
+        grouped = {}
+        for row in subscriptions:
+            key = (row["latitude"], row["longitude"], row["fish_type"], row["hour"])
+            if key not in grouped:
+                grouped[key] = {
+                    "users": [],
+                    "water_body": row["water_body"],
+                    "region": row["region"],
+                }
+            grouped[key]["users"].append(row["user_id"])
 
-    for (lat, lon, fish, hour), info in grouped.items():
-        try:
-            body = {"name": info["water_body"], "lat": lat, "lon": lon}
-            sample_user = info["users"][0]
-            result = await WeatherClient(lat, lon).evaluate(fish, hour, 0, sample_user)
-            if not result:
-                continue
+        for (lat, lon, fish, hour), info in grouped.items():
+            try:
+                body = {"name": info["water_body"], "lat": lat, "lon": lon}
+                sample_user = info["users"][0]
+                result = await WeatherClient(lat, lon).evaluate(fish, hour, 0, sample_user)
+                if not result:
+                    continue
 
-            lang = get_user_lang(sample_user)
-            stars = "⭐" * result["stars"] + "☆" * (5 - result["stars"])
-            text = (
-                f"🌅 <b>Щоденний прогноз</b>\n\n" if lang == "uk" else "🌅 <b>Ежедневный прогноз</b>\n\n"
-                f"{T(sample_user, 'body_label')} {body['name']}\n"
-                f"{T(sample_user, 'fish_label')} {fish}\n"
-                f"⏰ {hour:02d}:00\n"
-                f"{T(sample_user, 'stars_label')} {result['stars']}/5 {stars}\n"
-                f"{T(sample_user, 'score_label')} {result['score_100']}/100\n"
-                f"{T(sample_user, 'temp_air')} {result['temperature']}°C\n"
-                f"{T(sample_user, 'wind')} {result['wind_ms']} м/с\n"
-                f"{T(sample_user, 'pressure')} {result['pressure_mm']} мм\n\n"
-                f"{result['expert_commentary']}"
-            )
+                lang = get_user_lang(sample_user)
+                stars = "⭐" * result["stars"] + "☆" * (5 - result["stars"])
+                text = (
+                    (f"🌅 <b>Щоденний прогноз</b>\n\n" if lang == "uk" else "🌅 <b>Ежедневный прогноз</b>\n\n") +
+                    f"{T(sample_user, 'body_label')} {body['name']}\n"
+                    f"{T(sample_user, 'fish_label')} {fish}\n"
+                    f"⏰ {hour:02d}:00\n"
+                    f"{T(sample_user, 'stars_label')} {result['stars']}/5 {stars}\n"
+                    f"{T(sample_user, 'score_label')} {result['score_100']}/100\n"
+                    f"{T(sample_user, 'temp_air')} {result['temperature']}°C\n"
+                    f"{T(sample_user, 'wind')} {result['wind_ms']} м/с\n"
+                    f"{T(sample_user, 'pressure')} {result['pressure_mm']} мм\n\n"
+                    f"{result['expert_commentary']}"
+                )
 
-            for user_id in info["users"]:
-                try:
-                    await bot.send_message(user_id, text, parse_mode="HTML")
-                except Exception as e:
-                    logging.warning("Не вдалося надіслати прогноз користувачу %s: %s", user_id, e)
+                for user_id in info["users"]:
+                    try:
+                        await bot.send_message(user_id, text, parse_mode="HTML")
+                    except Exception as e:
+                        logging.warning("Не удалось отправить прогноз %s: %s", user_id, e)
 
-            await asyncio.sleep(random.uniform(1.0, 3.0))
-
-        except Exception as e:
-            logging.exception("Помилка в send_daily_forecasts для групи %s: %s", (lat, lon), e)
+                await asyncio.sleep(random.uniform(1.0, 3.0))
+            except Exception as e:
+                logging.exception("Ошибка в группе %s: %s", (lat, lon), e)
+    except Exception as e:
+        logging.exception("Ошибка в send_daily_forecasts: %s", e)
 
 
 async def check_extreme_weather():
-    subscriptions = get_subscriptions()
-    if not subscriptions:
-        return
+    try:
+        subscriptions = get_subscriptions()
+        if not subscriptions:
+            return
 
-    grouped = {}
-    for row in subscriptions:
-        key = (row["latitude"], row["longitude"])
-        if key not in grouped:
-            grouped[key] = []
-        grouped[key].append((row["user_id"], row["water_body"]))
+        grouped = {}
+        for row in subscriptions:
+            key = (row["latitude"], row["longitude"])
+            if key not in grouped:
+                grouped[key] = []
+            grouped[key].append((row["user_id"], row["water_body"]))
 
-    for (lat, lon), users in grouped.items():
-        try:
-            client = WeatherClient(lat, lon)
-            data = await client.get()
-            if not data:
-                continue
+        for (lat, lon), users in grouped.items():
+            try:
+                client = WeatherClient(lat, lon)
+                data = await client.get()
+                if not data:
+                    continue
 
-            pressures = data.get("hourly", {}).get("surface_pressure", [])
-            if len(pressures) < 12:
-                continue
+                pressures = data.get("hourly", {}).get("surface_pressure", [])
+                if len(pressures) < 12:
+                    continue
+                if pressures[-12] is None or pressures[-1] is None:
+                    continue
 
-            if pressures[-12] is None or pressures[-1] is None:
-                continue
+                a = pressures[-12]
+                b = pressures[-1]
+                delta = (b - a) * 0.75006
 
-            a = pressures[-12]
-            b = pressures[-1]
-            delta = (b - a) * 0.75006
+                if delta < -5:
+                    lang = get_user_lang(users[0][0])
+                    if lang == "uk":
+                        alert_text = (
+                            f"⚠️ <b>Різке падіння тиску</b>\n"
+                            f"🗺 {users[0][1]}\n"
+                            f"Зміна: {delta:.1f} мм рт.ст.\n"
+                            f"Кльов може стати нестабільним."
+                        )
+                    else:
+                        alert_text = (
+                            f"⚠️ <b>Резкое падение давления</b>\n"
+                            f"🗺 {users[0][1]}\n"
+                            f"Изменение: {delta:.1f} мм рт.ст.\n"
+                            f"Клёв может стать нестабильным."
+                        )
+                    for user_id, _ in users:
+                        try:
+                            await bot.send_message(user_id, alert_text, parse_mode="HTML")
+                        except Exception as e:
+                            logging.warning("Не удалось отправить предупреждение %s: %s", user_id, e)
 
-            if delta < -5:
-                lang = get_user_lang(users[0][0])
-                if lang == "uk":
-                    alert_text = (
-                        f"⚠️ <b>Різке падіння тиску</b>\n"
-                        f"🗺 {users[0][1]}\n"
-                        f"Зміна: {delta:.1f} мм рт.ст.\n"
-                        f"Кльов може стати нестабільним."
-                    )
-                else:
-                    alert_text = (
-                        f"⚠️ <b>Резкое падение давления</b>\n"
-                        f"🗺 {users[0][1]}\n"
-                        f"Изменение: {delta:.1f} мм рт.ст.\n"
-                        f"Клёв может стать нестабильным."
-                    )
-                for user_id, _ in users:
-                    try:
-                        await bot.send_message(user_id, alert_text, parse_mode="HTML")
-                    except Exception as e:
-                        logging.warning("Не вдалося надіслати попередження користувачу %s: %s", user_id, e)
-
-            await asyncio.sleep(random.uniform(1.0, 2.0))
-
-        except Exception as e:
-            logging.exception("Помилка check_extreme_weather для координат %s: %s", (lat, lon), e)
+                await asyncio.sleep(random.uniform(1.0, 2.0))
+            except Exception as e:
+                logging.exception("Ошибка check_extreme_weather для %s: %s", (lat, lon), e)
+    except Exception as e:
+        logging.exception("Ошибка в check_extreme_weather: %s", e)
 
 
 # ============================================================
@@ -1999,10 +2101,7 @@ async def check_extreme_weather():
 async def fallback(message: Message, state: FSMContext):
     current = await state.get_state()
     if current is None:
-        await message.answer(
-            "Нажмите /start",
-            reply_markup=regions_keyboard(),
-        )
+        await message.answer("Нажмите /start", reply_markup=regions_keyboard())
 
 
 async def health(_):
@@ -2031,33 +2130,23 @@ async def main():
 
     runner = web.AppRunner(app)
     await runner.setup()
-
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-
     logging.info("Health server started on port %s", PORT)
 
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(
-        send_daily_forecasts,
-        CronTrigger(hour=7, minute=0),
-        id="daily_forecast",
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        check_extreme_weather,
-        CronTrigger(hour=12, minute=0),
-        id="extreme_weather",
-        replace_existing=True,
-    )
+    scheduler.add_job(send_daily_forecasts, CronTrigger(hour=7, minute=0),
+                      id="daily_forecast", replace_existing=True)
+    scheduler.add_job(check_extreme_weather, CronTrigger(hour=12, minute=0),
+                      id="extreme_weather", replace_existing=True)
     scheduler.start()
 
     logging.info("Start polling")
-    logging.info("Cache TTL: %s seconds (12 hours)", CACHE_TTL)
-    logging.info("Wind speed unit forced to m/s")
 
     try:
         await dp.start_polling(bot)
+    except Exception as e:
+        logging.critical("Polling crashed: %s", e, exc_info=True)
     finally:
         scheduler.shutdown(wait=False)
         await runner.cleanup()
