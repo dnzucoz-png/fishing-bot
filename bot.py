@@ -213,6 +213,11 @@ LANG = {
         "location_failed": "Не вдалося визначити населений пункт. Спробуйте ще раз або виберіть область вручну.",
         "location_found": "📍 <b>{city}</b>\n🗺 Область: <b>{region}</b>\n🌐 Координати: {lat:.5f}, {lon:.5f}\n\n🐟 Тепер виберіть рибу:",
         "menu_returned": "🏠 Ви повернулися в головне меню.",
+        "sub_cancelled": "🔕 Підписку скасовано. Ви більше не отримуватимете щоденні прогнози.\n\nЩоб підписатися знову – натисніть «🔔 Підписка».",
+        "sub_none": "У вас немає активної підписки.",
+        "sub_active": "🔔 <b>Ваша підписка активна:</b>\n\n🗺 Водойма: <b>{body}</b>\n🐟 Риба: <b>{fish}</b>\n⏰ Час: <b>{hour:02d}:00</b>\n\nНатисніть кнопку нижче, щоб скасувати або змінити.",
+        "btn_cancel_sub": "🔕 Скасувати підписку",
+        "btn_change_sub": "🔄 Змінити підписку",
     },
     "ru": {
         "start": (
@@ -278,6 +283,11 @@ LANG = {
         "location_failed": "Не удалось определить населённый пункт. Попробуйте ещё раз или выберите область вручную.",
         "location_found": "📍 <b>{city}</b>\n🗺 Область: <b>{region}</b>\n🌐 Координаты: {lat:.5f}, {lon:.5f}\n\n🐟 Теперь выберите рыбу:",
         "menu_returned": "🏠 Вы вернулись в главное меню.",
+        "sub_cancelled": "🔕 Подписка отменена. Вы больше не будете получать ежедневные прогнозы.\n\nЧтобы подписаться снова – нажмите «🔔 Подписка».",
+        "sub_none": "У вас нет активной подписки.",
+        "sub_active": "🔔 <b>Ваша подписка активна:</b>\n\n🗺 Водоём: <b>{body}</b>\n🐟 Рыба: <b>{fish}</b>\n⏰ Время: <b>{hour:02d}:00</b>\n\nНажмите кнопку ниже, чтобы отменить или изменить.",
+        "btn_cancel_sub": "🔕 Отменить подписку",
+        "btn_change_sub": "🔄 Изменить подписку",
     }
 }
 
@@ -460,6 +470,23 @@ def get_subscriptions():
     return rows
 
 
+def delete_subscription(user_id):
+    conn = db()
+    conn.execute("DELETE FROM subscriptions WHERE user_id=?", (user_id,))
+    conn.commit()
+    conn.close()
+
+
+def has_subscription(user_id) -> bool:
+    try:
+        conn = db()
+        row = conn.execute("SELECT 1 FROM subscriptions WHERE user_id=? LIMIT 1", (user_id,)).fetchone()
+        conn.close()
+        return row is not None
+    except Exception:
+        return False
+
+
 def save_catch(user_id, fish, weight, length, location, photo_id):
     conn = db()
     conn.execute("""
@@ -617,9 +644,6 @@ def bait(fish, water_temp, wind):
 
 
 async def get_location_name(lat: float, lon: float, lang: str = "uk") -> Optional[Dict]:
-    """
-    Reverse geocoding через BigDataCloud (без API-ключа).
-    """
     url = "https://api.bigdatacloud.net/data/reverse-geocode-client"
     params = {
         "latitude": lat,
@@ -1329,7 +1353,7 @@ async def menu_handler(message: Message, state: FSMContext):
     await start_forecast(message, state)
 
 
-# ---------------- REGION (З ФІКСОМ КОНФЛІКТУ) ----------------
+# ---------------- REGION ----------------
 
 @dp.message(F.text.in_(REGIONS.keys()), ~StateFilter(SubscribeStates.region))
 async def region_handler(message: Message, state: FSMContext):
@@ -1739,7 +1763,34 @@ async def history_handler(message: Message):
 
 @dp.message(F.text == "🔔 Підписка")
 async def subscription_start(message: Message, state: FSMContext):
+    user_id = message.from_user.id
     await state.clear()
+
+    if has_subscription(user_id):
+        try:
+            conn = db()
+            row = conn.execute("""
+                SELECT region, water_body, fish_type, hour
+                FROM subscriptions WHERE user_id=?
+            """, (user_id,)).fetchone()
+            conn.close()
+        except Exception as e:
+            logging.warning("subscription_start fetch failed: %s", e)
+            row = None
+
+        if row:
+            text = T(user_id, "sub_active").format(
+                body=row["water_body"],
+                fish=row["fish_type"],
+                hour=row["hour"],
+            )
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=T(user_id, "btn_cancel_sub"), callback_data="cancel_sub")],
+                [InlineKeyboardButton(text=T(user_id, "btn_change_sub"), callback_data="change_sub")],
+            ])
+            await message.answer(text, reply_markup=kb, parse_mode="HTML")
+            return
+
     await state.set_state(SubscribeStates.region)
     await message.answer("Выберите область:", reply_markup=regions_keyboard())
 
@@ -1866,7 +1917,6 @@ async def subscription_hour(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("preview_"))
 async def preview_subscription(callback: CallbackQuery, state: FSMContext):
-    """Показывает пример прогноза для подписанной конфигурации."""
     try:
         hour = int(callback.data.split("_")[1])
     except Exception:
@@ -1920,6 +1970,61 @@ async def preview_subscription(callback: CallbackQuery, state: FSMContext):
     except Exception as e:
         logging.exception("preview error: %s", e)
         await callback.message.answer("Ошибка при подготовке примера.")
+
+
+@dp.callback_query(F.data == "cancel_sub")
+async def cancel_subscription_handler(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    try:
+        delete_subscription(user_id)
+    except Exception as e:
+        logging.warning("delete_subscription failed: %s", e)
+    await state.clear()
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    await callback.message.answer(T(user_id, "sub_cancelled"))
+    await callback.answer("Підписку скасовано")
+
+
+@dp.callback_query(F.data == "change_sub")
+async def change_subscription_handler(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    try:
+        delete_subscription(user_id)
+    except Exception as e:
+        logging.warning("delete_subscription failed: %s", e)
+
+    await state.clear()
+    await state.set_state(SubscribeStates.region)
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    await callback.message.answer(
+        "Оберіть нову область для підписки:",
+        reply_markup=regions_keyboard(),
+    )
+    await callback.answer()
+
+
+@dp.message(Command("unsubscribe"))
+async def unsubscribe_command(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    if not has_subscription(user_id):
+        await message.answer(T(user_id, "sub_none"))
+        return
+    try:
+        delete_subscription(user_id)
+    except Exception as e:
+        logging.warning("delete_subscription failed: %s", e)
+    await state.clear()
+    await message.answer(T(user_id, "sub_cancelled"))
 
 
 # ---------------- SEASON ----------------
