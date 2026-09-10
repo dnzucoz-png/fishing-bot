@@ -13,7 +13,7 @@ from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -33,7 +33,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("Не задана переменная окружения BOT_TOKEN")
 
-GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID", "-1004434293069"))
+GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID", "-1003932214140"))
 GROUP_URL = os.getenv("GROUP_URL", "https://t.me/+rKxYkNg85aAwNzFi")
 DB_FILE = os.getenv("DB_FILE", "fishing_forecast.db")
 PORT = int(os.getenv("PORT", "10000"))
@@ -95,10 +95,9 @@ SPAWNING = {
 }
 
 # ============================================================
-# СЕЗОННІ КОЕФІЦІЄНТИ (новое)
+# СЕЗОННІ КОЕФІЦІЄНТИ
 # ============================================================
 
-# Бонус/штраф до базової оцінки в залежності від сезону та виду риби
 SEASON_BONUS = {
     "Лящ":    {"spring": 8,  "summer": 4,  "autumn": 10, "winter": -6},
     "Карась": {"spring": 6,  "summer": 10, "autumn": 6,  "winter": -10},
@@ -620,7 +619,6 @@ def bait(fish, water_temp, wind):
 async def get_location_name(lat: float, lon: float, lang: str = "uk") -> Optional[Dict]:
     """
     Reverse geocoding через BigDataCloud (без API-ключа).
-    Повертає dict з полями city, region, country або None.
     """
     url = "https://api.bigdatacloud.net/data/reverse-geocode-client"
     params = {
@@ -945,7 +943,6 @@ class WeatherClient:
         predator = fish in PREDATORS
         lang = get_user_lang(user_id)
 
-        # ---- Розрахунок базової оцінки ----
         score = 48
         trend_text, trend_pts = self.pressure_trend(h.get("surface_pressure", []), idx, lang)
         stability_text, stability_pts = self.pressure_stability(h.get("surface_pressure", []), idx, lang)
@@ -956,7 +953,6 @@ class WeatherClient:
         score += self.precip_score(precip, predator)
         score += self.cloud_score(cloud, predator)
 
-        # ---- Сезон (новое) ----
         season = get_season(target_date.month)
         season_pts = SEASON_BONUS.get(fish, {}).get(season, 0)
         score += season_pts
@@ -1333,9 +1329,9 @@ async def menu_handler(message: Message, state: FSMContext):
     await start_forecast(message, state)
 
 
-# ---------------- REGION ----------------
+# ---------------- REGION (З ФІКСОМ КОНФЛІКТУ) ----------------
 
-@dp.message(F.text.in_(REGIONS.keys()))
+@dp.message(F.text.in_(REGIONS.keys()), ~StateFilter(SubscribeStates.region))
 async def region_handler(message: Message, state: FSMContext):
     region = message.text
     await state.clear()
@@ -1353,7 +1349,7 @@ async def back_region(message: Message, state: FSMContext):
     await start_forecast(message, state)
 
 
-# ---------------- LOCATION (ОБНОВЛЕНО) ----------------
+# ---------------- LOCATION ----------------
 
 @dp.message(F.text == "📍 Моє місце")
 async def location_request(message: Message):
@@ -1374,14 +1370,12 @@ async def location_handler(message: Message, state: FSMContext):
 
     logging.info(f"📍 Отримано геолокацію: lat={loc.latitude}, lon={loc.longitude}")
 
-    # Reverse geocoding → конкретний населений пункт
     place = await get_location_name(loc.latitude, loc.longitude, locality_lang)
 
     if place and place.get("city"):
         city_name = place["city"]
         region_name = place.get("region") or nearest_region(loc.latitude, loc.longitude)
     else:
-        # Fallback: якщо reverse geocoding не спрацював – використовуємо найближчу область
         region_name = nearest_region(loc.latitude, loc.longitude)
         city_name = region_name
         if not region_name:
@@ -1549,7 +1543,7 @@ async def back_to_day(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# ---------------- MAIN MENU (ФИКС) ----------------
+# ---------------- MAIN MENU ----------------
 
 @dp.callback_query(F.data == "main_menu")
 async def main_menu_callback(callback: CallbackQuery, state: FSMContext):
@@ -1557,13 +1551,11 @@ async def main_menu_callback(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await state.set_state(ForecastStates.region)
 
-    # Убираем кнопки у сообщения (работает и для фото, и для текста)
     try:
         await callback.message.edit_reply_markup(reply_markup=None)
     except Exception as e:
         logging.debug("edit_reply_markup failed: %s", e)
 
-    # Отправляем новое сообщение с меню
     try:
         await callback.message.answer(
             T(user_id, "start"),
@@ -1576,7 +1568,7 @@ async def main_menu_callback(callback: CallbackQuery, state: FSMContext):
     await callback.answer("🏠 Головне меню")
 
 
-# ---------------- RUN FORECAST (ОБНОВЛЕНО) ----------------
+# ---------------- RUN FORECAST ----------------
 
 async def run_forecast(message: Message, state: FSMContext, hour: int, callback_user_id=None):
     user_id = callback_user_id or message.from_user.id
@@ -1593,7 +1585,6 @@ async def run_forecast(message: Message, state: FSMContext, hour: int, callback_
         await state.clear()
         return
 
-    # Используем координаты из state (геолокация ИЛИ выбранная водоёма)
     body = {"name": body_name, "lat": lat, "lon": lon}
 
     await message.answer(T(user_id, "processing"))
@@ -1820,10 +1811,10 @@ async def subscription_hour(callback: CallbackQuery, state: FSMContext):
     except Exception:
         await callback.answer("Ошибка", show_alert=True)
         return
+
     data = await state.get_data()
     body = body_by_name(data.get("region", ""), data.get("water_body", ""))
     if not body:
-        # Возможно, это был геолокационный водоём – используем сохранённые координаты
         lat = data.get("latitude")
         lon = data.get("longitude")
         name = data.get("water_body")
@@ -1832,23 +1823,103 @@ async def subscription_hour(callback: CallbackQuery, state: FSMContext):
             await state.clear()
             return
         body = {"name": name, "lat": lat, "lon": lon}
+
+    fish = data.get("fish", "")
+    region = data.get("region", "")
+
     try:
-        save_subscription(
-            callback.from_user.id,
-            data.get("region", ""),
-            body,
-            data.get("fish", ""),
-            hour,
-        )
+        save_subscription(callback.from_user.id, region, body, fish, hour)
     except Exception as e:
         logging.warning("save_subscription failed: %s", e)
+
     await state.clear()
-    await safe_edit_or_send(
-        callback,
-        T(callback.from_user.id, "subscribe_done") +
-        f"\n🗺 {body['name']}\n🐟 {data.get('fish', '')}\n⏰ {hour:02d}:00"
-    )
+
+    lang = get_user_lang(callback.from_user.id)
+    if lang == "uk":
+        text = (
+            "✅ <b>ПІДПИСКУ АКТИВОВАНО</b>\n\n"
+            f"🗺 Водойма: <b>{body['name']}</b>\n"
+            f"🐟 Риба: <b>{fish}</b>\n"
+            f"⏰ Час розсилки: <b>{hour:02d}:00</b>\n\n"
+            "Щодня о цій годині бот надсилатиме вам свіжий прогноз кльову.\n\n"
+            "<i>Щоб змінити параметри – натисніть «🔔 Підписка» ще раз.</i>"
+        )
+        preview_btn = "👀 Показати приклад прогнозу"
+    else:
+        text = (
+            "✅ <b>ПОДПИСКА АКТИВИРОВАНА</b>\n\n"
+            f"🗺 Водоём: <b>{body['name']}</b>\n"
+            f"🐟 Рыба: <b>{fish}</b>\n"
+            f"⏰ Время рассылки: <b>{hour:02d}:00</b>\n\n"
+            "Ежедневно в это время бот будет присылать вам свежий прогноз клёва.\n\n"
+            "<i>Чтобы изменить параметры – нажмите «🔔 Подписка» ещё раз.</i>"
+        )
+        preview_btn = "👀 Показать пример прогноза"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=preview_btn, callback_data=f"preview_{hour}")],
+    ])
+
+    await safe_edit_or_send(callback, text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("preview_"))
+async def preview_subscription(callback: CallbackQuery, state: FSMContext):
+    """Показывает пример прогноза для подписанной конфигурации."""
+    try:
+        hour = int(callback.data.split("_")[1])
+    except Exception:
+        await callback.answer("Ошибка", show_alert=True)
+        return
+
+    try:
+        conn = db()
+        row = conn.execute("""
+            SELECT region, water_body, latitude, longitude, fish_type
+            FROM subscriptions WHERE user_id=?
+        """, (callback.from_user.id,)).fetchone()
+        conn.close()
+    except Exception as e:
+        logging.warning("preview fetch failed: %s", e)
+        row = None
+
+    if not row:
+        await callback.answer("Подписка не найдена", show_alert=True)
+        return
+
+    body = {
+        "name": row["water_body"],
+        "lat": row["latitude"],
+        "lon": row["longitude"],
+    }
+    fish = row["fish_type"]
+    user_id = callback.from_user.id
+
+    await callback.answer("Готовлю пример прогноза...")
+
+    try:
+        client = WeatherClient(body["lat"], body["lon"])
+        result = await client.evaluate(fish, hour, 0, user_id)
+        if not result:
+            await callback.message.answer("Не удалось получить прогноз. Попробуйте позже.")
+            return
+
+        stars = "⭐" * result["stars"] + "☆" * (5 - result["stars"])
+        text = (
+            f"{T(user_id, 'forecast_header')}\n\n"
+            f"{T(user_id, 'body_label')} {body['name']}\n"
+            f"📅 {result['forecast_day']}\n"
+            f"⏰ {result['hour']:02d}:00\n"
+            f"{T(user_id, 'fish_label')} {fish}\n\n"
+            f"{T(user_id, 'stars_label')} {result['stars']}/5 {stars}\n"
+            f"{T(user_id, 'score_label')} {result['score_100']}/100\n\n"
+            f"{result['expert_commentary']}"
+        )
+        await callback.message.answer(text, parse_mode="HTML")
+    except Exception as e:
+        logging.exception("preview error: %s", e)
+        await callback.message.answer("Ошибка при подготовке примера.")
 
 
 # ---------------- SEASON ----------------
