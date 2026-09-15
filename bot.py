@@ -33,7 +33,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("Не задана переменная окружения BOT_TOKEN")
 
-GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID", "-1003932214140"))
+GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID", "-1004434293069"))
 GROUP_URL = os.getenv("GROUP_URL", "https://t.me/+rKxYkNg85aAwNzFi")
 DB_FILE = os.getenv("DB_FILE", "fishing_forecast.db")
 PORT = int(os.getenv("PORT", "10000"))
@@ -862,16 +862,32 @@ class WeatherClient:
             return "❌ Резко меняется", -16
 
     @staticmethod
-    def temp_score(water, predator):
-        if predator:
-            if 8 <= water <= 16: return 12
-            if 5 <= water <= 20: return 6
-            if water > 24 or water < 3: return -10
+    def temp_score(water, predator, season="summer"):
+        """
+        Оптимальные температуры зависят от сезона.
+        Осенью и зимой оптимум ниже, летом — выше.
+        """
+        if season in ("autumn", "winter"):
+            if predator:
+                if 8 <= water <= 14: return 12
+                if 5 <= water <= 18: return 6
+                if water < 3 or water > 22: return -8
+                return 2
+            else:
+                if 14 <= water <= 20: return 10
+                if 10 <= water <= 24: return 4
+                if water < 6 or water > 26: return -10
+                return 0
+        else:  # spring / summer
+            if predator:
+                if 8 <= water <= 16: return 12
+                if 5 <= water <= 20: return 6
+                if water > 24 or water < 3: return -10
+                return 0
+            if 16 <= water <= 23: return 12
+            if 12 <= water <= 26: return 6
+            if water > 28 or water < 8: return -8
             return 0
-        if 16 <= water <= 23: return 12
-        if 12 <= water <= 26: return 6
-        if water > 28 or water < 8: return -8
-        return 0
 
     @staticmethod
     def wind_score(wind, direction, predator):
@@ -910,11 +926,12 @@ class WeatherClient:
 
     @staticmethod
     def star_score(score):
-        if score >= 84: return 5
-        if score >= 68: return 4
-        if score >= 50: return 3
-        if score >= 32: return 2
-        if score > 12: return 1
+        # Строгие пороги: 5 звёзд — только при действительно идеальных условиях
+        if score >= 90: return 5
+        if score >= 75: return 4
+        if score >= 55: return 3
+        if score >= 35: return 2
+        if score >= 15: return 1
         return 0
 
     @staticmethod
@@ -966,28 +983,60 @@ class WeatherClient:
         water_temp = round(max(0, min(30, temp * 0.82 + 3.2)), 1)
         predator = fish in PREDATORS
         lang = get_user_lang(user_id)
+        season = get_season(target_date.month)
 
-        score = 48
+        # ============================
+        # НОВА ФОРМУЛА ОЦІНКИ
+        # ============================
+        score = 30  # базова оцінка (було 48)
+
+        # Група "тиск" (обмежена сумарно)
         trend_text, trend_pts = self.pressure_trend(h.get("surface_pressure", []), idx, lang)
         stability_text, stability_pts = self.pressure_stability(h.get("surface_pressure", []), idx, lang)
-        score += trend_pts + stability_pts
-        score += self.pressure_score(pressure_mm, predator)
-        score += self.temp_score(water_temp, predator)
+        score += min(12, trend_pts + stability_pts)          # максимум +12
+        score += min(10, self.pressure_score(pressure_mm, predator))  # максимум +10
+
+        # Температура з урахуванням сезону
+        temp_pts = self.temp_score(water_temp, predator, season)
+        score += temp_pts
+
+        # Вітер, опади, хмарність
         score += self.wind_score(wind, direction, predator)
         score += self.precip_score(precip, predator)
         score += self.cloud_score(cloud, predator)
 
-        season = get_season(target_date.month)
+        # Штраф за "передгрозові" умови (висока вологість + майже повна хмарність)
+        if humidity > 85 and cloud > 90 and precip < 0.1:
+            score -= 5
+
+        # Бонус після дощу (кльов часто покращується)
+        if precip > 0.5 and humidity > 80:
+            score += 3
+
+        # Сезонний бонус — ріжемо, якщо вода далека від оптимуму для сезону
         season_pts = SEASON_BONUS.get(fish, {}).get(season, 0)
+        if season in ("autumn", "winter") and water_temp < 15:
+            season_pts = int(season_pts * 0.5)
+        elif season == "summer" and water_temp > 26:
+            season_pts = int(season_pts * 0.5)
         score += season_pts
 
+        # Час доби та фаза Місяця
         sun_title, sun_desc, sun_pts = sun_activity(hour, lang)
         score += sun_pts
         moon_text, moon_pts = moon_phase(target_date, lang)
         score += moon_pts if predator else int(moon_pts * 0.5)
+
+        # М'яке обмеження: вище 88 балів приріст сповільнюється
+        if score > 88:
+            score = 88 + (score - 88) * 0.5
+
         score = max(0, min(100, int(score)))
         stars = self.star_score(score)
 
+        # ============================
+        # Комфорт
+        # ============================
         comfort = 50
         if 15 <= temp <= 25:
             comfort += 20
@@ -1041,6 +1090,8 @@ class WeatherClient:
                 commentary.append(f"🌧 Опади: {precip:.1f} мм.")
             else:
                 commentary.append(f"☁️ Хмарність: {cloud:.0f}%.")
+            if humidity > 85 and cloud > 90 and precip < 0.1:
+                commentary.append("⚠️ Висока вологість при повній хмарності — можливе погіршення кльову.")
             commentary.append(f"🌕 {moon_text}")
             commentary.append(f"🌤 Комфорт: {comfort}/100")
             commentary.append(f"🎣 Насадка: {bait(fish, water_temp, wind)}")
@@ -1048,11 +1099,11 @@ class WeatherClient:
                 commentary.append(f"🎯 Для {fish}: шукайте бровки, перепади глибини, течію.")
             else:
                 commentary.append(f"🎯 Для {fish}: точкове прикормлення і акуратна подача.")
-            if score >= 78:
-                verdict = "🏆 Відмінні умови."
-            elif score >= 55:
+            if score >= 88:
+                verdict = "🏆 Ідеальні умови."
+            elif score >= 72:
                 verdict = "⚖️ Хороші умови."
-            elif score >= 40:
+            elif score >= 50:
                 verdict = "🟠 Середні умови."
             else:
                 verdict = "🔴 Складні умови."
@@ -1076,6 +1127,8 @@ class WeatherClient:
                 commentary.append(f"🌧 Осадки: {precip:.1f} мм.")
             else:
                 commentary.append(f"☁️ Облачность: {cloud:.0f}%.")
+            if humidity > 85 and cloud > 90 and precip < 0.1:
+                commentary.append("⚠️ Высокая влажность при полной облачности — возможно ухудшение клёва.")
             commentary.append(f"🌕 {moon_text}")
             commentary.append(f"🌤 Комфорт: {comfort}/100")
             commentary.append(f"🎣 Насадка: {bait(fish, water_temp, wind)}")
@@ -1083,11 +1136,11 @@ class WeatherClient:
                 commentary.append(f"🎯 Для {fish}: ищите бровки, перепады глубины, течение.")
             else:
                 commentary.append(f"🎯 Для {fish}: точечная прикормка и аккуратная подача.")
-            if score >= 78:
-                verdict = "🏆 Отличные условия."
-            elif score >= 55:
+            if score >= 88:
+                verdict = "🏆 Идеальные условия."
+            elif score >= 72:
                 verdict = "⚖️ Хорошие условия."
-            elif score >= 40:
+            elif score >= 50:
                 verdict = "🟠 Средние условия."
             else:
                 verdict = "🔴 Сложные условия."
@@ -1189,11 +1242,11 @@ def make_image(result, region, body_name, fish, user_id):
             y += 36
         draw.line((30, y + 5, 970, y + 5), fill=(180, 180, 180), width=2)
         y += 25
-        if result["score_100"] >= 78:
-            verdict = "ВІДМІННІ УМОВИ" if lang == "uk" else "ОТЛИЧНЫЕ УСЛОВИЯ"
-        elif result["score_100"] >= 55:
+        if result["score_100"] >= 88:
+            verdict = "ІДЕАЛЬНІ УМОВИ" if lang == "uk" else "ИДЕАЛЬНЫЕ УСЛОВИЯ"
+        elif result["score_100"] >= 72:
             verdict = "ХОРОШІ УМОВИ" if lang == "uk" else "ХОРОШИЕ УСЛОВИЯ"
-        elif result["score_100"] >= 40:
+        elif result["score_100"] >= 50:
             verdict = "СЕРЕДНІ УМОВИ" if lang == "uk" else "СРЕДНИЕ УСЛОВИЯ"
         else:
             verdict = "СКЛАДНІ УМОВИ" if lang == "uk" else "СЛОЖНЫЕ УСЛОВИЯ"
@@ -1302,14 +1355,12 @@ bot = Bot(BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 
-# ---- Глобальный обработчик ошибок ----
 @dp.errors()
 async def errors_handler(update: types.Update, exception: Exception):
     logging.exception("❌ Необработанная ошибка: %s", exception)
     return True
 
 
-# ---- Безопасное редактирование сообщения ----
 async def safe_edit_or_send(callback: CallbackQuery, text: str, reply_markup=None, parse_mode=None):
     try:
         await callback.message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
@@ -1624,9 +1675,9 @@ async def run_forecast(message: Message, state: FSMContext, hour: int, callback_
     forecast_id = save_forecast(user_id, region or "", body, fish, result)
 
     stars = "⭐" * result["stars"] + "☆" * (5 - result["stars"])
-    if result["score_100"] >= 80:
+    if result["score_100"] >= 85:
         grade = T(user_id, "grade_excellent")
-    elif result["score_100"] >= 60:
+    elif result["score_100"] >= 65:
         grade = T(user_id, "grade_good")
     elif result["score_100"] >= 40:
         grade = T(user_id, "grade_medium")
