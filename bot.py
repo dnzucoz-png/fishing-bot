@@ -169,9 +169,10 @@ LANG = {
             "• орієнтовна температура води;\n"
             "• вітер, напрямок, хмарність та опади;\n"
             "• час доби, місячна фаза та сезон;\n"
+            "• період нересту;\n"
+            "• порывы ветра, перепады температуры;\n"
             "• окремі коефіцієнти для хижака і мирної риби.\n\n"
-            "Дані погоди: Open-Meteo (основний), WeatherAPI (резервний).\n"
-            "Кеш погоди: 12 годин."
+            "Дані погоди: Open-Meteo (основний), WeatherAPI (резервний)."
         ),
         "processing": "⏳ Аналізую погоду саме для обраної водойми...",
         "rate": (
@@ -238,9 +239,10 @@ LANG = {
             "• ориентировочная температура воды;\n"
             "• ветер, направление, облачность и осадки;\n"
             "• время суток, фаза Луны и сезон;\n"
+            "• период нереста;\n"
+            "• порывы ветра, перепады температуры;\n"
             "• отдельные коэффициенты для хищника и мирной рыбы.\n\n"
-            "Источник погоды: Open-Meteo (основной), WeatherAPI (резервный).\n"
-            "Кэш погоды: 12 часов."
+            "Источник погоды: Open-Meteo (основной), WeatherAPI (резервный)."
         ),
         "processing": "⏳ Анализирую погоду именно для выбранного водоёма...",
         "rate": (
@@ -706,8 +708,9 @@ class WeatherAPIClient:
     def _convert_wa_to_om(self, wa_data):
         hourly = {
             "time": [], "temperature_2m": [], "surface_pressure": [],
-            "wind_speed_10m": [], "wind_direction_10m": [], "cloud_cover": [],
-            "precipitation": [], "relative_humidity_2m": []
+            "wind_speed_10m": [], "wind_gusts_10m": [], "wind_direction_10m": [],
+            "cloud_cover": [], "precipitation": [], "relative_humidity_2m": [],
+            "weather_code": []
         }
         for day in wa_data.get("forecast", {}).get("forecastday", []):
             date = day["date"]
@@ -715,11 +718,14 @@ class WeatherAPIClient:
                 hourly["time"].append(f"{date}T{hour_data['time']}")
                 hourly["temperature_2m"].append(hour_data.get("temp_c", 18))
                 hourly["surface_pressure"].append(hour_data.get("pressure_mb", 1013.25))
-                hourly["wind_speed_10m"].append(hour_data.get("wind_kph", 0) / 3.6)
+                wind_kph = hour_data.get("wind_kph", 0)
+                hourly["wind_speed_10m"].append(wind_kph / 3.6)
+                hourly["wind_gusts_10m"].append(hour_data.get("gust_kph", wind_kph * 1.5) / 3.6)
                 hourly["wind_direction_10m"].append(hour_data.get("wind_degree", 0))
                 hourly["cloud_cover"].append(hour_data.get("cloud", 40))
                 hourly["precipitation"].append(hour_data.get("precip_mm", 0))
                 hourly["relative_humidity_2m"].append(hour_data.get("humidity", 55))
+                hourly["weather_code"].append(hour_data.get("condition", {}).get("code", 0))
         return {"hourly": hourly}
 
 
@@ -737,9 +743,13 @@ class WeatherClient:
         params = {
             "latitude": self.lat,
             "longitude": self.lon,
-            "hourly": ("temperature_2m,relative_humidity_2m,surface_pressure,"
-                       "wind_speed_10m,wind_direction_10m,cloud_cover,precipitation,apparent_temperature"),
-            "past_days": 2,
+            "hourly": (
+                "temperature_2m,relative_humidity_2m,"
+                "surface_pressure,wind_speed_10m,wind_direction_10m,"
+                "wind_gusts_10m,cloud_cover,precipitation,"
+                "precipitation_probability,weather_code,apparent_temperature"
+            ),
+            "past_days": 3,
             "forecast_days": 4,
             "timezone": "auto",
             "wind_speed_unit": "ms",
@@ -788,6 +798,12 @@ class WeatherClient:
         if cached:
             return cached["data"]
         return None
+
+    @staticmethod
+    def _val_at(arr, idx, default=0):
+        if arr is None or idx < 0 or idx >= len(arr) or arr[idx] is None:
+            return default
+        return arr[idx]
 
     @staticmethod
     def pressure_score(mm, predator):
@@ -935,10 +951,7 @@ class WeatherClient:
             return None
 
         def val(key, default):
-            arr = h.get(key, [])
-            if idx >= len(arr) or arr[idx] is None:
-                return default
-            return arr[idx]
+            return self._val_at(h.get(key, []), idx, default)
 
         pressure_hpa = float(val("surface_pressure", 1013.25))
         pressure_mm = pressure_hpa * 0.75006
@@ -955,24 +968,104 @@ class WeatherClient:
         lang = get_user_lang(user_id)
         season = get_season(target_date.month)
 
-        # ---- ОЦІНКА ----
+        # ============================
+        # РОЗШИРЕНА ФОРМУЛА ОЦІНКИ (17 факторів)
+        # ============================
         score = 30
 
+        # 1. Тиск
         trend_text, trend_pts = self.pressure_trend(h.get("surface_pressure", []), idx, lang)
         stability_text, stability_pts = self.pressure_stability(h.get("surface_pressure", []), idx, lang)
         score += min(12, trend_pts + stability_pts)
         score += min(10, self.pressure_score(pressure_mm, predator))
 
+        # 2. Температура води
         score += self.temp_score(water_temp, predator, season)
+
+        # 3. Вітер + опади + хмарність
         score += self.wind_score(wind, direction, predator)
         score += self.precip_score(precip, predator)
         score += self.cloud_score(cloud, predator)
 
+        # 4. Передгрозові умови
         if humidity > 85 and cloud > 90 and precip < 0.1:
             score -= 5
+
+        # 5. Свіжа вода після дощу
         if precip > 0.5 and humidity > 80:
             score += 3
 
+        # ---- НОВІ ФАКТОРИ ----
+
+        # 6. Пориви вітру
+        gusts = float(val("wind_gusts_10m", wind * 1.5))
+        if gusts > 15:
+            score -= 12
+            gusts_note = f"💨 Сильні пориви вітру: {gusts:.1f} м/с — проводка ускладнена."
+        elif gusts > 10:
+            score -= 4
+            gusts_note = f"💨 Помірні пориви вітру: {gusts:.1f} м/с."
+        else:
+            gusts_note = None
+
+        # 7. Перепад температури за добу
+        temp_24h_back = self._val_at(h.get("temperature_2m", []), idx - 24, temp)
+        temp_24h_fwd = self._val_at(h.get("temperature_2m", []), idx + 24, temp)
+        daily_range = max(temp, temp_24h_back, temp_24h_fwd) - min(temp, temp_24h_back, temp_24h_fwd)
+        if daily_range > 12:
+            score -= 8
+            temp_range_note = f"⚠️ Різкий перепад температури за добу ({daily_range:.1f}°C) — кльов нестабільний."
+        elif daily_range > 8:
+            score -= 3
+            temp_range_note = f"⚠️ Помірний перепад температури за добу ({daily_range:.1f}°C)."
+        else:
+            temp_range_note = None
+
+        # 8. Тренд температури за 3 дні
+        temp_3d_ago = self._val_at(h.get("temperature_2m", []), idx - 72, temp)
+        temp_delta_3d = temp - temp_3d_ago
+        if abs(temp_delta_3d) > 8:
+            score -= 6
+            trend_temp_note = f"⚠️ Різка зміна температури за 3 дні ({temp_delta_3d:+.1f}°C) — риба адаптується."
+        elif abs(temp_delta_3d) < 2:
+            score += 3
+            trend_temp_note = "✅ Стабільна температура за 3 дні — риба звикла до умов."
+        else:
+            trend_temp_note = None
+
+        # 9. День після дощу
+        yest_precip = self._val_at(h.get("precipitation", []), idx - 24, 0)
+        if yest_precip > 3 and precip < 0.5:
+            score += 6
+            yest_note = "✅ Після вчорашнього дощу — свіжа вода, кльов має покращитись."
+        else:
+            yest_note = None
+
+        # 10. Гроза / сильний дощ (weather_code WMO)
+        try:
+            weather_code = int(val("weather_code", 0))
+        except (ValueError, TypeError):
+            weather_code = 0
+        if weather_code in (95, 96, 99):
+            score -= 10
+            storm_note = "⛈ Гроза — риба залягає на дно, кльов слабкий."
+        elif weather_code in (65, 75, 82):
+            score -= 6
+            storm_note = "🌧 Сильні опади — кльов може бути слабким."
+        else:
+            storm_note = None
+
+        # 11. Нерест
+        spawn_range = SPAWNING.get(fish)
+        if spawn_range and spawn_range[0] <= target_date.month <= spawn_range[1]:
+            spawn_penalty = -12
+            spawn_note = f"⚠️ Зараз період нересту ({spawn_range[0]}–{spawn_range[1]} міс.) — кльов може бути слабким."
+        else:
+            spawn_penalty = 0
+            spawn_note = None
+        score += spawn_penalty
+
+        # 12. Сезон
         season_pts = SEASON_BONUS.get(fish, {}).get(season, 0)
         if season in ("autumn", "winter") and water_temp < 15:
             season_pts = int(season_pts * 0.5)
@@ -980,11 +1073,13 @@ class WeatherClient:
             season_pts = int(season_pts * 0.5)
         score += season_pts
 
+        # 13. Час доби + фаза Місяця
         sun_title, sun_desc, sun_pts = sun_activity(hour, lang)
         score += sun_pts
         moon_text, moon_pts = moon_phase(target_date, lang)
         score += moon_pts if predator else int(moon_pts * 0.5)
 
+        # М'яке обмеження
         if score > 88:
             score = 88 + (score - 88) * 0.5
 
@@ -1047,6 +1142,19 @@ class WeatherClient:
                 commentary.append(f"☁️ Хмарність: {cloud:.0f}%.")
             if humidity > 85 and cloud > 90 and precip < 0.1:
                 commentary.append("⚠️ Висока вологість при повній хмарності — можливе погіршення кльову.")
+            # Нові фактори
+            if gusts_note:
+                commentary.append(gusts_note)
+            if temp_range_note:
+                commentary.append(temp_range_note)
+            if trend_temp_note:
+                commentary.append(trend_temp_note)
+            if yest_note:
+                commentary.append(yest_note)
+            if storm_note:
+                commentary.append(storm_note)
+            if spawn_note:
+                commentary.append(spawn_note)
             commentary.append(f"🌕 {moon_text}")
             commentary.append(f"🌤 Комфорт: {comfort}/100")
             commentary.append(f"🎣 Насадка: {bait(fish, water_temp, wind)}")
@@ -1084,6 +1192,19 @@ class WeatherClient:
                 commentary.append(f"☁️ Облачность: {cloud:.0f}%.")
             if humidity > 85 and cloud > 90 and precip < 0.1:
                 commentary.append("⚠️ Высокая влажность при полной облачности — возможно ухудшение клёва.")
+            # Новые факторы
+            if gusts_note:
+                commentary.append(gusts_note)
+            if temp_range_note:
+                commentary.append(temp_range_note)
+            if trend_temp_note:
+                commentary.append(trend_temp_note)
+            if yest_note:
+                commentary.append(yest_note)
+            if storm_note:
+                commentary.append(storm_note)
+            if spawn_note:
+                commentary.append(spawn_note)
             commentary.append(f"🌕 {moon_text}")
             commentary.append(f"🌤 Комфорт: {comfort}/100")
             commentary.append(f"🎣 Насадка: {bait(fish, water_temp, wind)}")
@@ -1110,6 +1231,7 @@ class WeatherClient:
             "pressure_stability": stability_text,
             "wind_ms": round(wind, 1),
             "wind_dir": direction,
+            "wind_gusts": round(gusts, 1),
             "humidity": round(humidity),
             "cloud_cover": round(cloud),
             "precipitation": round(precip, 1),
@@ -1173,7 +1295,7 @@ def make_image(result, region, body_name, fish, user_id):
                 f"Температура повітря: {result['temperature']}°C",
                 f"Вода: ~{result['water_temp']}°C",
                 f"Тиск: {result['pressure_mm']} мм",
-                f"Вітер: {result['wind_ms']} м/с ({result['wind_dir']})",
+                f"Вітер: {result['wind_ms']} м/с ({result['wind_dir']}), пориви {result.get('wind_gusts', '—')}",
                 f"Вологість: {result['humidity']}%",
                 f"Хмарність: {result['cloud_cover']}%",
                 f"Опади: {result['precipitation']} мм",
@@ -1185,7 +1307,7 @@ def make_image(result, region, body_name, fish, user_id):
                 f"Температура воздуха: {result['temperature']}°C",
                 f"Вода: ~{result['water_temp']}°C",
                 f"Давление: {result['pressure_mm']} мм",
-                f"Ветер: {result['wind_ms']} м/с ({result['wind_dir']})",
+                f"Ветер: {result['wind_ms']} м/с ({result['wind_dir']}), порывы {result.get('wind_gusts', '—')}",
                 f"Влажность: {result['humidity']}%",
                 f"Облачность: {result['cloud_cover']}%",
                 f"Осадки: {result['precipitation']} мм",
@@ -1653,6 +1775,7 @@ async def run_forecast(message: Message, state: FSMContext, hour: int, callback_
         f"   {result['pressure_trend']}\n"
         f"   {result['pressure_stability']}\n"
         f"{T(user_id, 'wind')} {result['wind_ms']} м/с, {result['wind_dir']}\n"
+        f"   Пориви: {result.get('wind_gusts', '—')} м/с\n"
         f"{T(user_id, 'humidity')} {result['humidity']}%\n"
         f"{T(user_id, 'cloud')} {result['cloud_cover']}%\n"
         f"{T(user_id, 'precip')} {result['precipitation']} мм\n"
@@ -2195,7 +2318,7 @@ def chart_by_weekday(days: int = 30) -> Optional[bytes]:
 
     result = [0] * 7
     for r in rows:
-        idx = (r["wd"] + 6) % 7  # Monday → 0, Sunday → 6
+        idx = (r["wd"] + 6) % 7
         result[idx] = r["c"]
 
     labels = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд"]
