@@ -3,3 +3,4 @@ aiohttp>=3.8.0
 apscheduler
 Pillow
 matplotlib
+matplotlib
