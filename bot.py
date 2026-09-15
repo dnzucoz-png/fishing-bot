@@ -49,7 +49,7 @@ PORT = int(os.getenv("PORT", "10000"))
 WEATHERAPI_KEY = os.getenv("WEATHERAPI_KEY", "")
 
 # ID админов (кому доступна команда /stats). Впишите свой ID.
-ADMIN_IDS = {123456789}
+ADMIN_IDS = {837548827}
 
 CACHE_TTL = 12 * 60 * 60
 RATE_LIMIT_COOLDOWN = 15 * 60
